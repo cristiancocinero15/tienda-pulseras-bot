@@ -1,0 +1,4 @@
+python-telegram-bot==21.6
+pillow==10.4.0
+rembg==2.0.59
+onnxruntime==1.19.2
