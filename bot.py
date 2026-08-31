@@ -1,31 +1,32 @@
 """
-Bot de Telegram - Tienda de Pulseras (con login de usuarios y panel admin)
+Bot de Telegram - Tienda de Pulseras
 ---------------------------------------------------------------------------
-- Registro de usuario al /start: si no existe, pide nombre de usuario.
-  - Si el nombre es el del admin -> pide contraseña (ADMIN_PASSWORD, por variable de entorno).
-  - Si el nombre ya está cogido -> sugiere uno libre (con número); si lo rechaza,
-    se le indica que contacte con el admin para que se lo asignen.
+- Al /start: si el chat ya tiene una cuenta asociada, entra directo al menú.
+  Si no, se ofrece "🆕 Crear cuenta" o "🔑 Iniciar sesión".
+    - Crear cuenta: pide nombre de usuario.
+        - Si es el nombre del admin -> pide contraseña (ADMIN_PASSWORD).
+        - Si el nombre ya está cogido -> sugiere uno libre (con número).
+        - Si es un nombre libre normal -> pide compartir el número de
+          teléfono de Telegram (gratis, verificado por Telegram) y crea la cuenta.
+    - Iniciar sesión (para mover la cuenta a otro dispositivo/chat): pide el
+      nombre de usuario y, si no es el admin, pide compartir el número de
+      teléfono para comprobar que coincide con el registrado.
 - Catálogo dinámico guardado en base de datos (tienda.db).
-- Solo el admin puede añadir productos: nombre, precio y foto. La foto se
-  procesa automáticamente para quitar el fondo y ponerlo blanco.
+- Solo el admin puede añadir productos (nombre, precio y foto).
 - Los clientes solo pueden ver catálogo, carrito y hacer pedidos (no editan nada).
-- Ubicación: se valida en silencio contra el radio de Vinaròs (1 km). Si no
-  está dentro, se informa de que no se puede usar el servicio ahí y se da
-  el contacto.
+- Ubicación: se valida en silencio contra el radio de Vinaròs (1 km).
 
 Variables de entorno necesarias:
-    BOT_TOKEN         -> token de @BotFather
-    PROVIDER_TOKEN     -> token de pagos (Stripe u otra pasarela)
-    ADMIN_USERNAME     -> nombre de usuario del admin (ej. cristiancocinero15)
-    ADMIN_PASSWORD     -> contraseña del admin (NUNCA la subas al código/GitHub)
+    BOT_TOKEN        -> token de @BotFather
+    PROVIDER_TOKEN    -> token de pagos (Stripe u otra pasarela)
+    ADMIN_USERNAME    -> nombre de usuario del admin (ej. cristiancocinero15)
+    ADMIN_PASSWORD    -> contraseña del admin (NUNCA la subas al código/GitHub)
 """
 
-import io
 import logging
 import math
 import os
 
-from PIL import Image
 from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -48,12 +49,6 @@ from telegram.ext import (
 
 import db
 
-try:
-    from rembg import remove as rembg_remove
-    REMBG_DISPONIBLE = True
-except ImportError:
-    REMBG_DISPONIBLE = False
-
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
@@ -73,8 +68,8 @@ VINAROS_LON = 0.4753
 RADIO_MAXIMO_KM = 1.0
 
 # Estados de conversación
-(ASK_USERNAME, ASK_PASSWORD, CONFIRM_ALT_USERNAME,
- ADMIN_NOMBRE, ADMIN_PRECIO, ADMIN_FOTO) = range(6)
+(CHOOSE_ACCION, ASK_USERNAME, ASK_PASSWORD_ADMIN, CONFIRM_ALT_USERNAME, ASK_PHONE,
+ ADMIN_NOMBRE, ADMIN_PRECIO, ADMIN_FOTO) = range(8)
 
 
 # ---------------------------------------------------------------------
@@ -88,23 +83,6 @@ def distancia_km(lat1, lon1, lat2, lon2) -> float:
     dlambda = math.radians(lon2 - lon1)
     a = math.sin(dphi / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dlambda / 2) ** 2
     return 2 * R * math.asin(math.sqrt(a))
-
-
-def quitar_fondo_y_poner_blanco(imagen_bytes: bytes) -> bytes:
-    """Quita el fondo de la foto del producto y lo sustituye por blanco."""
-    if not REMBG_DISPONIBLE:
-        return imagen_bytes
-    try:
-        recorte = rembg_remove(imagen_bytes)  # PNG con fondo transparente
-        img = Image.open(io.BytesIO(recorte)).convert("RGBA")
-        fondo_blanco = Image.new("RGBA", img.size, (255, 255, 255, 255))
-        fondo_blanco.paste(img, (0, 0), img)
-        salida = io.BytesIO()
-        fondo_blanco.convert("RGB").save(salida, format="PNG")
-        return salida.getvalue()
-    except Exception as e:
-        logger.warning("No se pudo quitar el fondo: %s", e)
-        return imagen_bytes
 
 
 def get_cart(context: ContextTypes.DEFAULT_TYPE) -> dict:
@@ -135,7 +113,7 @@ def menu_principal_kb(es_admin: bool) -> InlineKeyboardMarkup:
 
 async def enviar_menu(chat_id, context, es_admin, saludo=""):
     texto = saludo + "\n\n¿Qué quieres hacer?" if saludo else "¿Qué quieres hacer?"
-    await context.bot.send_message(chat_id, texto, reply_markup=menu_principal_kb(es_admin))
+    await context.bot.send_message(chat_id, texto, reply_markup=menu_principal_kb(es_admin), )
 
 
 # ---------------------------------------------------------------------
@@ -153,29 +131,65 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return ConversationHandler.END
 
+    kb = InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("🆕 Crear cuenta", callback_data="accion_crear")],
+            [InlineKeyboardButton("🔑 Iniciar sesión", callback_data="accion_login")],
+        ]
+    )
     await update.message.reply_text(
         "👋 Bienvenido a *Tienda de Pulseras*.\n\n"
-        "Es tu primera vez aquí. Escribe el *nombre de usuario* que quieres usar:",
+        "¿Ya tienes cuenta o eres nuevo?",
         parse_mode="Markdown",
+        reply_markup=kb,
     )
+    return CHOOSE_ACCION
+
+
+async def elegir_accion(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    context.user_data["auth_purpose"] = "signup" if query.data == "accion_crear" else "login"
+
+    await context.bot.send_message(query.message.chat_id, "Escribe tu nombre de usuario:")
     return ASK_USERNAME
 
 
 async def recibir_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
     username = update.message.text.strip()
-    telegram_id = update.effective_user.id
+    purpose = context.user_data.get("auth_purpose", "signup")
+    context.user_data["pending_username"] = username
 
+    # --- Caso admin (mismo flujo tanto para crear como para iniciar sesión) ---
     if username == ADMIN_USERNAME:
         if not ADMIN_PASSWORD:
             await update.message.reply_text(
-                "⚠️ El admin todavía no ha configurado la contraseña (ADMIN_PASSWORD). "
-                "Contacta con soporte."
+                "⚠️ El admin todavía no ha configurado la contraseña (ADMIN_PASSWORD)."
             )
             return ConversationHandler.END
-        context.user_data["pending_username"] = username
         await update.message.reply_text("🔒 Ese usuario es el admin. Escribe la contraseña:")
-        return ASK_PASSWORD
+        return ASK_PASSWORD_ADMIN
 
+    # --- Iniciar sesión con un usuario normal ---
+    if purpose == "login":
+        usuario = db.get_user_by_username(username)
+        if not usuario:
+            await update.message.reply_text(
+                "No existe ninguna cuenta con ese nombre. Si eres nuevo, escribe /start "
+                "y elige '🆕 Crear cuenta'."
+            )
+            return ConversationHandler.END
+        kb = ReplyKeyboardMarkup(
+            [[KeyboardButton("📱 Compartir mi número", request_contact=True)]],
+            resize_keyboard=True, one_time_keyboard=True,
+        )
+        await update.message.reply_text(
+            "Para confirmar que eres tú, comparte tu número de teléfono:",
+            reply_markup=kb,
+        )
+        return ASK_PHONE
+
+    # --- Crear cuenta con un usuario normal ---
     if db.username_exists(username):
         sugerido = db.sugerir_username_libre(username)
         context.user_data["pending_username"] = sugerido
@@ -192,49 +206,99 @@ async def recibir_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return CONFIRM_ALT_USERNAME
 
-    db.create_user(telegram_id, username, is_admin=False)
-    await enviar_menu(update.effective_chat.id, context, False, f"✅ Usuario *{username}* creado.")
-    return ConversationHandler.END
+    kb = ReplyKeyboardMarkup(
+        [[KeyboardButton("📱 Compartir mi número", request_contact=True)]],
+        resize_keyboard=True, one_time_keyboard=True,
+    )
+    await update.message.reply_text(
+        "Para terminar el registro, comparte tu número de teléfono:",
+        reply_markup=kb,
+    )
+    return ASK_PHONE
 
 
-async def recibir_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def recibir_password_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     password = update.message.text
     telegram_id = update.effective_user.id
-    username = context.user_data.get("pending_username")
 
-    if password == ADMIN_PASSWORD:
-        db.create_user(telegram_id, username, is_admin=True)
-        await enviar_menu(update.effective_chat.id, context, True, "✅ Acceso de admin concedido.")
+    if password != ADMIN_PASSWORD:
+        await update.message.reply_text("❌ Contraseña incorrecta. Escribe /start para volver a intentarlo.")
         return ConversationHandler.END
 
-    await update.message.reply_text(
-        "❌ Contraseña incorrecta. Escribe /start para volver a intentarlo."
-    )
+    existente = db.get_user_by_username(ADMIN_USERNAME)
+    if existente:
+        db.update_telegram_id(ADMIN_USERNAME, telegram_id)
+    else:
+        db.create_user(telegram_id, ADMIN_USERNAME, phone_number=None, is_admin=True)
+
+    await enviar_menu(update.effective_chat.id, context, True, "✅ Acceso de admin concedido.")
     return ConversationHandler.END
 
 
 async def confirmar_username_alternativo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    telegram_id = update.effective_user.id
 
     if query.data == "alt_si":
-        username = context.user_data.get("pending_username")
-        db.create_user(telegram_id, username, is_admin=False)
-        await context.bot.send_message(query.message.chat_id, f"✅ Usuario *{username}* creado.", parse_mode="Markdown")
-        await enviar_menu(query.message.chat_id, context, False)
-    else:
+        kb = ReplyKeyboardMarkup(
+            [[KeyboardButton("📱 Compartir mi número", request_contact=True)]],
+            resize_keyboard=True, one_time_keyboard=True,
+        )
         await context.bot.send_message(
             query.message.chat_id,
-            "De acuerdo, no se ha creado el usuario. Contacta con el admin "
-            f"(@{ADMIN_USERNAME} · ☎️ {CONTACTO_TELEFONO}) para que te asigne uno. "
-            "Cuando lo tengas, escribe /start otra vez.",
+            "Para terminar el registro, comparte tu número de teléfono:",
+            reply_markup=kb,
         )
+        return ASK_PHONE
+
+    await context.bot.send_message(
+        query.message.chat_id,
+        "De acuerdo, no se ha creado el usuario. Contacta con el admin "
+        f"(@{ADMIN_USERNAME} · ☎️ {CONTACTO_TELEFONO}) para que te asigne uno. "
+        "Cuando lo tengas, escribe /start otra vez.",
+    )
+    return ConversationHandler.END
+
+
+async def recibir_telefono(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    contacto = update.message.contact
+    telegram_id = update.effective_user.id
+    purpose = context.user_data.get("auth_purpose", "signup")
+    username = context.user_data.get("pending_username")
+
+    if not contacto or contacto.user_id != telegram_id:
+        await update.message.reply_text(
+            "Tienes que compartir *tu propio* número (usando el botón), no el de otra persona.",
+            parse_mode="Markdown",
+        )
+        return ASK_PHONE
+
+    telefono = contacto.phone_number
+
+    if purpose == "login":
+        usuario = db.get_user_by_username(username)
+        if usuario and usuario["phone_number"] == telefono:
+            db.update_telegram_id(username, telegram_id)
+            await enviar_menu(
+                update.effective_chat.id, context, False,
+                "✅ Número verificado. Sesión iniciada.",
+            )
+        else:
+            await update.message.reply_text(
+                "❌ Ese número no coincide con el registrado para esa cuenta. "
+                f"Contacta con el admin (☎️ {CONTACTO_TELEFONO}) si necesitas ayuda.",
+                reply_markup=ReplyKeyboardRemove(),
+            )
+        return ConversationHandler.END
+
+    # purpose == "signup"
+    db.create_user(telegram_id, username, phone_number=telefono, is_admin=False)
+    await enviar_menu(update.effective_chat.id, context, False, f"✅ Usuario *{username}* creado.")
     return ConversationHandler.END
 
 
 async def cancelar(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Operación cancelada.")
+    await update.message.reply_text("Operación cancelada.", reply_markup=ReplyKeyboardRemove())
     return ConversationHandler.END
 
 
@@ -257,8 +321,7 @@ async def mostrar_catalogo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         kb = InlineKeyboardMarkup(
             [[InlineKeyboardButton(f"➕ Añadir · {prod['precio']:.2f}€", callback_data=f"add_{prod['id']}")]]
         )
-        ruta = prod["imagen"]
-        with open(ruta, "rb") as foto:
+        with open(prod["imagen"], "rb") as foto:
             await context.bot.send_photo(
                 chat_id=chat_id,
                 photo=foto,
@@ -337,9 +400,7 @@ async def pedir_ubicacion(update: Update, context: ContextTypes.DEFAULT_TYPE):
         resize_keyboard=True, one_time_keyboard=True,
     )
     await context.bot.send_message(
-        query.message.chat_id,
-        "Para continuar, envía tu ubicación:",
-        reply_markup=kb,
+        query.message.chat_id, "Para continuar, envía tu ubicación:", reply_markup=kb,
     )
 
 
@@ -347,7 +408,6 @@ async def recibir_ubicacion(update: Update, context: ContextTypes.DEFAULT_TYPE):
     loc = update.message.location
     dist = distancia_km(loc.latitude, loc.longitude, VINAROS_LAT, VINAROS_LON)
 
-    # Comprobación silenciosa: no se avisa nada hasta tener el resultado.
     if dist > RADIO_MAXIMO_KM:
         await update.message.reply_text(
             "❌ Lo sentimos, no podemos entregar en tu ubicación. Solo repartimos "
@@ -430,10 +490,7 @@ async def admin_add_precio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Precio no válido, escribe solo un número, ej. 3.50:")
         return ADMIN_PRECIO
     context.user_data["nuevo_producto_precio"] = precio
-    await update.message.reply_text(
-        "Envía ahora la *foto* del producto (le pondré fondo blanco automáticamente):",
-        parse_mode="Markdown",
-    )
+    await update.message.reply_text("Envía ahora la *foto* del producto:", parse_mode="Markdown")
     return ADMIN_FOTO
 
 
@@ -442,25 +499,26 @@ async def admin_add_foto(update: Update, context: ContextTypes.DEFAULT_TYPE):
     archivo = await foto.get_file()
     datos = bytes(await archivo.download_as_bytearray())
 
-    datos_procesados = quitar_fondo_y_poner_blanco(datos)
-
     nombre = context.user_data["nuevo_producto_nombre"]
     precio = context.user_data["nuevo_producto_precio"]
 
-    nombre_archivo = f"{nombre.lower().replace(' ', '_')}_{foto.file_unique_id}.png"
+    nombre_archivo = f"{nombre.lower().replace(' ', '_')}_{foto.file_unique_id}.jpg"
     ruta = os.path.join(IMG_DIR, nombre_archivo)
     with open(ruta, "wb") as f:
-        f.write(datos_procesados)
+        f.write(datos)
 
     db.add_product(nombre, precio, ruta)
 
-    aviso_fondo = "" if REMBG_DISPONIBLE else "\n(No se pudo quitar el fondo automáticamente: falta la librería rembg)"
     await update.message.reply_text(
-        f"✅ Producto *{nombre}* añadido al catálogo ({precio:.2f}€).{aviso_fondo}",
+        f"✅ Producto *{nombre}* añadido al catálogo ({precio:.2f}€).",
         parse_mode="Markdown",
     )
     return ConversationHandler.END
 
+
+# ---------------------------------------------------------------------
+# Seed inicial del catálogo
+# ---------------------------------------------------------------------
 
 SEED_PRODUCTOS = [
     ("Pulsera clásica Negra", 2.50, "clasico_negro.png"),
@@ -477,7 +535,6 @@ SEED_PRODUCTOS = [
 
 
 def sembrar_catalogo_inicial():
-    """Si la base de datos no tiene productos, carga las pulseras de ejemplo."""
     if db.contar_productos() > 0:
         return
     for nombre, precio, archivo in SEED_PRODUCTOS:
@@ -498,9 +555,11 @@ def main():
     login_conv = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
         states={
+            CHOOSE_ACCION: [CallbackQueryHandler(elegir_accion, pattern="^accion_")],
             ASK_USERNAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, recibir_username)],
-            ASK_PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, recibir_password)],
+            ASK_PASSWORD_ADMIN: [MessageHandler(filters.TEXT & ~filters.COMMAND, recibir_password_admin)],
             CONFIRM_ALT_USERNAME: [CallbackQueryHandler(confirmar_username_alternativo, pattern="^alt_")],
+            ASK_PHONE: [MessageHandler(filters.CONTACT, recibir_telefono)],
         },
         fallbacks=[CommandHandler("cancelar", cancelar)],
     )
