@@ -1,18 +1,18 @@
 # Tienda de Pulseras - Bot de Telegram
 
-Bot con sistema de usuarios (crear cuenta / iniciar sesión, verificación por número de Telegram), catálogo de pulseras gestionable por el admin, carrito de compra, validación de zona de entrega (solo Vinaròs, hasta 1 km) y pago online.
+Bot con sistema de usuarios (crear cuenta / iniciar sesión / cerrar sesión), catálogo gestionable por el admin (fotos recortadas a 1:1), lista de usuarios para el admin, carrito de compra, validación de zona de entrega (solo Vinaròs, hasta 1 km) y pago online.
 
 ## 1. Instalar dependencias
 
 ```bash
-pip install python-telegram-bot --break-system-packages
+pip install python-telegram-bot pillow --break-system-packages
 ```
 
 ## 2. Crear el bot en Telegram
 
 1. Habla con **@BotFather** en Telegram.
 2. `/newbot` y sigue los pasos → te da un **token**.
-3. Para pagos: en @BotFather usa `/mybots` → tu bot → **Payments** → conecta una pasarela (ej. Stripe) → te da un **provider_token**.
+3. Para pagos: `/mybots` → tu bot → **Payments** → conecta una pasarela (ej. Stripe) → te da un **provider_token**.
 
 ## 3. Configurar variables de entorno
 
@@ -31,55 +31,54 @@ export ADMIN_PASSWORD="la_contraseña_que_tú_elijas"
 python3 bot.py
 ```
 
-Al arrancar por primera vez se crea la base de datos `tienda.db` (usuarios y productos) y se cargan las 10 pulseras de ejemplo ya generadas en `/imagenes`.
+Al arrancar por primera vez se crea `tienda.db` y se cargan las 10 pulseras de ejemplo de `/imagenes`.
 
 ## Cómo funciona
 
 ### `/start`
-- Si el chat ya tiene una cuenta asociada, entra directo al menú.
-- Si no, se ofrece **"🆕 Crear cuenta"** o **"🔑 Iniciar sesión"**.
+- Sesión activa → entra directo al menú.
+- Sin sesión → "🆕 Crear cuenta" o "🔑 Iniciar sesión".
 
 ### Crear cuenta
-1. Pide un nombre de usuario.
-   - Si es `ADMIN_USERNAME` → pide la contraseña (`ADMIN_PASSWORD`).
-   - Si ya está cogido → sugiere una variante (ej. `nombre1`); si la rechazas, se te indica que contactes con el admin.
-2. Para usuarios normales, pide compartir el número de teléfono con un botón (verificado por Telegram, gratis — no se envía ningún SMS).
-3. Cuenta creada, listo para usar el bot.
+1. Nombre de usuario (si es `ADMIN_USERNAME` → pide contraseña; si ya está cogido → sugiere una variante).
+2. Escribes tu teléfono a mano, con prefijo de país (ej. `+34612345678`).
+3. Confirmas con un único botón "✅ Crear" → se borra ese mensaje de confirmación y aparece el menú.
 
 ### Iniciar sesión (mover la cuenta a otro móvil/chat)
-1. Pide el nombre de usuario.
-2. Si es el admin → pide la contraseña.
-3. Si es un usuario normal → pide compartir el número de teléfono; si coincide con el que quedó guardado al crear la cuenta, la sesión se traslada a este chat.
+1. Nombre de usuario.
+2. Admin → contraseña. Usuario normal → escribe el teléfono; si coincide con el guardado, la cuenta se traslada a este chat.
+
+### 🚪 Cerrar sesión
+Disponible para cliente y admin en el menú. Al cerrar sesión, hace falta volver a iniciar sesión (usuario + teléfono, o usuario + contraseña si eres el admin) para volver a usar el bot desde ese chat.
 
 ### Catálogo y carrito
-- 🎨 Ver catálogo: envía cada producto como foto con botón "➕ Añadir".
-- 🛒 Carrito: botón disponible en todo momento, muestra lista y total.
-- Los usuarios normales **solo pueden pedir**, no pueden editar ni añadir productos.
+- 🎨 Ver catálogo, 🛒 Carrito con botón "⬅️ Menú" para volver sin acumular mensajes de más.
+- Los clientes **solo pueden pedir** — no pueden editar ni añadir productos, y si mandan una foto o archivo el bot les avisa de que solo se atiende por chat de texto/botones.
 
 ### Panel de admin
-- Solo aparece el botón "➕ Añadir producto (admin)" si has entrado como `ADMIN_USERNAME` con la contraseña correcta.
-- Flujo: nombre → precio → foto. Se guarda tal cual en el catálogo.
+- **➕ Añadir producto**: nombre → precio → foto (se recorta automáticamente al centro para quedar cuadrada, 1:1).
+- **👥 Ver usuarios**: lista de nombres de usuario registrados (admin, activos o con sesión cerrada) — **no se muestra el número de teléfono de nadie**, ni siquiera al admin.
 
 ### Ubicación y entrega
-- Al finalizar pedido, el bot pide la ubicación del usuario.
-- Se comprueba en silencio la distancia al centro de Vinaròs (`VINAROS_LAT`/`VINAROS_LON` en `bot.py`). Si está a más de 1 km (`RADIO_MAXIMO_KM`), se informa de que no se puede entregar ahí y se da el contacto.
-- Si está dentro del radio, se envía la factura de pago (Telegram Payments).
+- Comprobación silenciosa de la distancia al centro de Vinaròs (`VINAROS_LAT`/`VINAROS_LON`, radio `RADIO_MAXIMO_KM` en `bot.py`). Si está fuera, se avisa y se da el contacto.
 
 ### Contacto
-- Botón "📞 Contacto" en el menú: muestra el teléfono (614378910) y el usuario del admin.
+- 📞 Contacto: +34 614378910 · 👤 Admin: @cristiancocinero15
 
-## Desplegar en la nube desde el móvil (Railway, 24/7 sin PC)
+### ⚠️ Sobre "no se puede borrar el chat"
+No es algo que un bot pueda controlar: borrar o vaciar el chat es una acción del propio cliente de Telegram de cada persona (cliente o admin), no del bot. No existe ninguna API de Telegram que permita a un bot bloquear eso para unos usuarios sí y para otros no.
 
-1. Sube todos estos archivos (`bot.py`, `db.py`, `Procfile`, `requirements.txt`, `generar_imagenes.py` y la carpeta `imagenes`) a tu repositorio de **GitHub**.
-2. Ve a **railway.app** → "Login with GitHub" → "New Project" → "Deploy from GitHub repo".
-3. En **Variables**, añade: `BOT_TOKEN`, `PROVIDER_TOKEN`, `ADMIN_USERNAME`, `ADMIN_PASSWORD`.
-4. Railway instalará `requirements.txt` y arrancará el bot con el `Procfile`.
+## Desplegar en Railway (24/7 sin PC)
 
-⚠️ Railway borra los archivos del contenedor en cada redeploy (el sistema de ficheros no es persistente por defecto). Eso significa que **la base de datos `tienda.db` y las fotos nuevas que suba el admin se perderán** si vuelves a desplegar. Para que sobrevivan a los redeploys, en Railway puedes añadir un **Volume** (Settings → Volumes) — pregúntame si quieres que te ayude a configurarlo.
+1. Sube `bot.py`, `db.py`, `Procfile`, `requirements.txt`, `generar_imagenes.py` y la carpeta `imagenes` a tu repo de GitHub.
+2. Railway → "Deploy from GitHub repo".
+3. Variables: `BOT_TOKEN`, `PROVIDER_TOKEN`, `ADMIN_USERNAME`, `ADMIN_PASSWORD`.
+
+⚠️ El sistema de archivos de Railway no es persistente entre redeploys: `tienda.db` y las fotos que suba el admin se perderán si vuelves a desplegar, salvo que añadas un **Volume** (Settings → Volumes) — pregúntame si quieres que te ayude a configurarlo.
 
 ## Personalizar
 
 - **Radio de entrega**: `RADIO_MAXIMO_KM` en `bot.py`.
-- **Coordenadas del centro de Vinaròs**: `VINAROS_LAT` / `VINAROS_LON` en `bot.py`.
-- **Teléfono de contacto**: `CONTACTO_TELEFONO` en `bot.py`.
-- **Pulseras de ejemplo iniciales**: `generar_imagenes.py` + lista `SEED_PRODUCTOS` en `bot.py`.
+- **Coordenadas de Vinaròs**: `VINAROS_LAT` / `VINAROS_LON`.
+- **Teléfono de contacto**: `CONTACTO_TELEFONO`.
+- **Pulseras de ejemplo iniciales**: `generar_imagenes.py` + `SEED_PRODUCTOS` en `bot.py`.
