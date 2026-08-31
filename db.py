@@ -28,8 +28,16 @@ def init_db():
         """CREATE TABLE IF NOT EXISTS productos (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             nombre TEXT NOT NULL,
+            categoria TEXT NOT NULL DEFAULT 'General',
             precio REAL NOT NULL,
             imagen TEXT NOT NULL
+        )"""
+    )
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS pendientes_verificacion (
+            telegram_id INTEGER PRIMARY KEY,
+            codigo TEXT NOT NULL,
+            creado_en TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )"""
     )
     conn.commit()
@@ -116,13 +124,42 @@ def update_telegram_id(username: str, new_telegram_id: int):
     conn.close()
 
 
+# --- Verificación (compartida entre el bot principal y el bot de SMS) ---
+
+def set_pendiente(telegram_id: int, codigo: str):
+    conn = get_conn()
+    conn.execute(
+        "INSERT INTO pendientes_verificacion (telegram_id, codigo) VALUES (?, ?) "
+        "ON CONFLICT(telegram_id) DO UPDATE SET codigo = excluded.codigo, creado_en = CURRENT_TIMESTAMP",
+        (telegram_id, codigo),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_pendiente_codigo(telegram_id: int):
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT codigo FROM pendientes_verificacion WHERE telegram_id = ?", (telegram_id,)
+    ).fetchone()
+    conn.close()
+    return row["codigo"] if row else None
+
+
+def borrar_pendiente(telegram_id: int):
+    conn = get_conn()
+    conn.execute("DELETE FROM pendientes_verificacion WHERE telegram_id = ?", (telegram_id,))
+    conn.commit()
+    conn.close()
+
+
 # --- Productos ---
 
-def add_product(nombre: str, precio: float, imagen: str) -> int:
+def add_product(nombre: str, precio: float, imagen: str, categoria: str = "General") -> int:
     conn = get_conn()
     cur = conn.execute(
-        "INSERT INTO productos (nombre, precio, imagen) VALUES (?, ?, ?)",
-        (nombre, precio, imagen),
+        "INSERT INTO productos (nombre, categoria, precio, imagen) VALUES (?, ?, ?, ?)",
+        (nombre, categoria, precio, imagen),
     )
     conn.commit()
     pid = cur.lastrowid
@@ -130,11 +167,25 @@ def add_product(nombre: str, precio: float, imagen: str) -> int:
     return pid
 
 
-def get_products():
+def get_products(categoria: str = None):
     conn = get_conn()
-    rows = conn.execute("SELECT * FROM productos ORDER BY id").fetchall()
+    if categoria:
+        rows = conn.execute(
+            "SELECT * FROM productos WHERE categoria = ? ORDER BY id", (categoria,)
+        ).fetchall()
+    else:
+        rows = conn.execute("SELECT * FROM productos ORDER BY categoria, id").fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+def get_categories():
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT DISTINCT categoria FROM productos ORDER BY categoria"
+    ).fetchall()
+    conn.close()
+    return [r["categoria"] for r in rows]
 
 
 def get_product(pid: int):

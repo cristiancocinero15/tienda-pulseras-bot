@@ -25,6 +25,7 @@ Variables de entorno necesarias:
     ADMIN_PASSWORD    -> contraseña del admin (NUNCA la subas al código/GitHub)
 """
 
+import asyncio
 import io
 import logging
 import math
@@ -67,6 +68,10 @@ ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "cristiancocinero15")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 CONTACTO_TELEFONO = "+34 614378910"
 
+# Segundo bot (solo para mandar el código de verificación)
+SMS_BOT_TOKEN = os.environ.get("SMS_BOT_TOKEN", "")
+SMS_BOT_USERNAME = os.environ.get("SMS_BOT_USERNAME", "sms_tienda_bot")
+
 IMG_DIR = os.path.join(os.path.dirname(__file__), "imagenes")
 os.makedirs(IMG_DIR, exist_ok=True)
 
@@ -78,7 +83,7 @@ TELEFONO_REGEX = re.compile(r"^\+\d{8,15}$")
 
 # Estados de conversación
 (CHOOSE_ACCION, ASK_USERNAME, ASK_PASSWORD_ADMIN, CONFIRM_ALT_USERNAME,
- ASK_PHONE, CONFIRM_PHONE, ADMIN_NOMBRE, ADMIN_PRECIO, ADMIN_FOTO) = range(9)
+ ASK_PHONE, CONFIRM_PHONE, ADMIN_NOMBRE, ADMIN_CATEGORIA, ADMIN_PRECIO, ADMIN_FOTO) = range(10)
 
 
 # ---------------------------------------------------------------------
@@ -215,26 +220,33 @@ async def recibir_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
     username = update.message.text.strip()
     purpose = context.user_data.get("auth_purpose", "signup")
     context.user_data["pending_username"] = username
+    chat_id = update.effective_chat.id
+
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
 
     if username == ADMIN_USERNAME:
         if not ADMIN_PASSWORD:
-            await update.message.reply_text(
-                "⚠️ El admin todavía no ha configurado la contraseña (ADMIN_PASSWORD)."
+            await context.bot.send_message(
+                chat_id, "⚠️ El admin todavía no ha configurado la contraseña (ADMIN_PASSWORD)."
             )
             return ConversationHandler.END
-        await update.message.reply_text("🔒 Ese usuario es el admin. Escribe la contraseña:")
+        await context.bot.send_message(chat_id, "🔒 Ese usuario es el admin. Escribe la contraseña:")
         return ASK_PASSWORD_ADMIN
 
     if purpose == "login":
         usuario = db.get_user_by_username(username)
         if not usuario:
-            await update.message.reply_text(
+            await context.bot.send_message(
+                chat_id,
                 "No existe ninguna cuenta con ese nombre. Si eres nuevo, escribe /start "
-                "y elige '🆕 Crear cuenta'."
+                "y elige '🆕 Crear cuenta'.",
             )
             return ConversationHandler.END
-        await update.message.reply_text(
-            "Escribe tu número de teléfono con el prefijo de país (ej: +34612345678):"
+        await context.bot.send_message(
+            chat_id, "Escribe tu número de teléfono con el prefijo de país (ej: +34612345678):"
         )
         return ASK_PHONE
 
@@ -247,15 +259,16 @@ async def recibir_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton("❌ No, prefiero otro", callback_data="alt_no")],
             ]
         )
-        await update.message.reply_text(
+        await context.bot.send_message(
+            chat_id,
             f"Ese nombre ya está en uso. ¿Te vale *{sugerido}*?",
             parse_mode="Markdown",
             reply_markup=kb,
         )
         return CONFIRM_ALT_USERNAME
 
-    await update.message.reply_text(
-        "Escribe tu número de teléfono con el prefijo de país (ej: +34612345678):"
+    await context.bot.send_message(
+        chat_id, "Escribe tu número de teléfono con el prefijo de país (ej: +34612345678):"
     )
     return ASK_PHONE
 
@@ -263,9 +276,15 @@ async def recibir_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def recibir_password_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     password = update.message.text
     telegram_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
 
     if password != ADMIN_PASSWORD:
-        await update.message.reply_text("❌ Contraseña incorrecta. Escribe /start para volver a intentarlo.")
+        await context.bot.send_message(chat_id, "❌ Contraseña incorrecta. Escribe /start para volver a intentarlo.")
         return ConversationHandler.END
 
     existente = db.get_user_by_username(ADMIN_USERNAME)
@@ -274,7 +293,7 @@ async def recibir_password_admin(update: Update, context: ContextTypes.DEFAULT_T
     else:
         db.create_user(telegram_id, ADMIN_USERNAME, phone_number=None, is_admin=True)
 
-    await enviar_menu(update.effective_chat.id, context, True, "✅ Acceso de admin concedido.")
+    await enviar_menu(chat_id, context, True, "✅ Acceso de admin concedido.")
     return ConversationHandler.END
 
 
@@ -298,6 +317,8 @@ async def confirmar_username_alternativo(update: Update, context: ContextTypes.D
 
 async def recibir_telefono(update: Update, context: ContextTypes.DEFAULT_TYPE):
     telefono = update.message.text.strip().replace(" ", "")
+    chat_id = update.effective_chat.id
+    telegram_id = update.effective_user.id
 
     if not TELEFONO_REGEX.match(telefono):
         await update.message.reply_text(
@@ -305,14 +326,24 @@ async def recibir_telefono(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return ASK_PHONE
 
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
+
     context.user_data["pending_phone"] = telefono
     codigo = generar_codigo_verificacion()
-    context.user_data["verification_code"] = codigo
+    db.set_pendiente(telegram_id, codigo)
 
-    msg = await update.message.reply_text(
-        f"📲 Tu código de verificación es: *{codigo}*\n\n"
-        "Escríbelo aquí para confirmar que este número es tuyo.",
+    kb = InlineKeyboardMarkup(
+        [[InlineKeyboardButton("📲 Ir a verificar", url=f"https://t.me/{SMS_BOT_USERNAME}?start=verificar")]]
+    )
+    msg = await context.bot.send_message(
+        chat_id,
+        f"Pulsa el botón para hablar con @{SMS_BOT_USERNAME}, dale a *Iniciar* y te mandará tu código de "
+        "verificación. Luego vuelve aquí y escríbelo.",
         parse_mode="Markdown",
+        reply_markup=kb,
     )
     context.user_data["code_msg_id"] = msg.message_id
     return CONFIRM_PHONE
@@ -320,14 +351,14 @@ async def recibir_telefono(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def confirmar_codigo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     codigo_escrito = update.message.text.strip().upper()
-    codigo_esperado = context.user_data.get("verification_code")
+    telegram_id = update.effective_user.id
+    codigo_esperado = db.get_pendiente_codigo(telegram_id)
     chat_id = update.effective_chat.id
 
-    if codigo_escrito != codigo_esperado:
+    if not codigo_esperado or codigo_escrito != codigo_esperado:
         await update.message.reply_text("❌ Código incorrecto. Vuelve a escribirlo:")
         return CONFIRM_PHONE
 
-    telegram_id = update.effective_user.id
     purpose = context.user_data.get("auth_purpose", "signup")
     username = context.user_data.get("pending_username")
     telefono = context.user_data.get("pending_phone")
@@ -339,6 +370,7 @@ async def confirmar_codigo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             mensaje_ok = "✅ Número verificado. Sesión iniciada."
             es_admin_flag = bool(usuario["is_admin"])
         else:
+            db.borrar_pendiente(telegram_id)
             await update.message.reply_text(
                 "❌ Ese número no coincide con el registrado para esa cuenta. "
                 f"Contacta con el admin (☎️ {CONTACTO_TELEFONO}) si necesitas ayuda."
@@ -349,7 +381,9 @@ async def confirmar_codigo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         mensaje_ok = f"✅ Usuario *{username}* creado."
         es_admin_flag = False
 
-    # Limpieza: se borra el mensaje del código y el que escribió el usuario.
+    db.borrar_pendiente(telegram_id)
+
+    # Limpieza: se borra el mensaje con el botón de verificar y el que escribió el usuario.
     code_msg_id = context.user_data.get("code_msg_id")
     if code_msg_id:
         try:
@@ -390,15 +424,42 @@ async def cerrar_sesion(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def mostrar_catalogo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    chat_id = query.message.chat_id
     await query.answer()
 
-    productos = db.get_products()
-    if not productos:
-        await query.edit_message_text("Todavía no hay productos en el catálogo.")
+    categorias = db.get_categories()
+    if not categorias:
+        kb_vacio = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Menú", callback_data="volver_menu")]])
+        await query.edit_message_text("Todavía no hay productos en el catálogo.", reply_markup=kb_vacio)
         return
 
-    await query.edit_message_text("Aquí tienes el catálogo 👇")
+    if len(categorias) == 1:
+        await mostrar_productos_de_categoria(query, context, categorias[0])
+        return
+
+    botones = [[InlineKeyboardButton(c, callback_data=f"catview_{c}")] for c in categorias]
+    botones.append([InlineKeyboardButton("🗂️ Ver todo", callback_data="catview_todas")])
+    botones.append([InlineKeyboardButton("⬅️ Menú", callback_data="volver_menu")])
+    await query.edit_message_text("¿Qué categoría quieres ver?", reply_markup=InlineKeyboardMarkup(botones))
+
+
+async def elegir_categoria_catalogo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    categoria = query.data.replace("catview_", "")
+    await mostrar_productos_de_categoria(query, context, None if categoria == "todas" else categoria)
+
+
+async def mostrar_productos_de_categoria(query, context, categoria):
+    chat_id = query.message.chat_id
+    productos = db.get_products(categoria)
+
+    if not productos:
+        kb_vacio = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Menú", callback_data="volver_menu")]])
+        await query.edit_message_text("No hay productos en esta categoría.", reply_markup=kb_vacio)
+        return
+
+    titulo = f"Categoría: {categoria}" if categoria else "Todo el catálogo"
+    await query.edit_message_text(f"{titulo} 👇")
     for prod in productos:
         kb = InlineKeyboardMarkup(
             [[InlineKeyboardButton(f"➕ Añadir · {prod['precio']:.2f}€", callback_data=f"add_{prod['id']}")]]
@@ -407,11 +468,19 @@ async def mostrar_catalogo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_photo(
                 chat_id=chat_id,
                 photo=foto,
-                caption=f"*{prod['nombre']}*\n{prod['precio']:.2f}€",
+                caption=f"*{prod['nombre']}*\n{prod['categoria']} · {prod['precio']:.2f}€",
                 parse_mode="Markdown",
                 reply_markup=kb,
             )
-    await context.bot.send_message(chat_id, "Cuando termines, pulsa 🛒 para ver tu carrito.")
+    kb_final = InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("🛒 Ver carrito", callback_data="ver_carrito")],
+            [InlineKeyboardButton("⬅️ Menú", callback_data="volver_menu")],
+        ]
+    )
+    await context.bot.send_message(chat_id, "Cuando termines, pulsa 🛒 para ver tu carrito.", reply_markup=kb_final)
+
+
 
 
 async def anadir_al_carrito(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -588,7 +657,50 @@ async def admin_add_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def admin_add_nombre(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["nuevo_producto_nombre"] = update.message.text.strip()
-    await update.message.reply_text("Precio (ej. 3.50):")
+    chat_id = update.effective_chat.id
+
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
+
+    categorias = db.get_categories()
+    botones = [[InlineKeyboardButton(c, callback_data=f"catsel_{c}")] for c in categorias]
+    botones.append([InlineKeyboardButton("➕ Nueva categoría", callback_data="cat_nueva")])
+    await context.bot.send_message(
+        chat_id, "Elige la categoría del producto (o crea una nueva):",
+        reply_markup=InlineKeyboardMarkup(botones),
+    )
+    return ADMIN_CATEGORIA
+
+
+async def admin_categoria_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "cat_nueva":
+        await query.edit_message_text("Escribe el nombre de la nueva categoría:")
+        return ADMIN_CATEGORIA
+
+    categoria = query.data.replace("catsel_", "")
+    context.user_data["nuevo_producto_categoria"] = categoria
+    await query.edit_message_text(f"Categoría: *{categoria}*\n\nPrecio (ej. 3.50):", parse_mode="Markdown")
+    return ADMIN_PRECIO
+
+
+async def admin_categoria_texto(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    categoria = update.message.text.strip()
+    chat_id = update.effective_chat.id
+    context.user_data["nuevo_producto_categoria"] = categoria
+
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
+
+    await context.bot.send_message(
+        chat_id, f"Categoría: *{categoria}*\n\nPrecio (ej. 3.50):", parse_mode="Markdown"
+    )
     return ADMIN_PRECIO
 
 
@@ -599,7 +711,14 @@ async def admin_add_precio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Precio no válido, escribe solo un número, ej. 3.50:")
         return ADMIN_PRECIO
     context.user_data["nuevo_producto_precio"] = precio
-    await update.message.reply_text(
+
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
+
+    await context.bot.send_message(
+        update.effective_chat.id,
         "Envía ahora la *foto* del producto (se recortará a cuadrada 1:1 automáticamente):",
         parse_mode="Markdown",
     )
@@ -613,6 +732,7 @@ async def admin_add_foto(update: Update, context: ContextTypes.DEFAULT_TYPE):
     datos_cuadrados = recortar_cuadrada(datos)
 
     nombre = context.user_data["nuevo_producto_nombre"]
+    categoria = context.user_data.get("nuevo_producto_categoria", "General")
     precio = context.user_data["nuevo_producto_precio"]
 
     nombre_archivo = f"{nombre.lower().replace(' ', '_')}_{foto.file_unique_id}.jpg"
@@ -620,10 +740,10 @@ async def admin_add_foto(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with open(ruta, "wb") as f:
         f.write(datos_cuadrados)
 
-    db.add_product(nombre, precio, ruta)
+    db.add_product(nombre, precio, ruta, categoria)
 
     await update.message.reply_text(
-        f"✅ Producto *{nombre}* añadido al catálogo ({precio:.2f}€), foto recortada a 1:1.",
+        f"✅ Producto *{nombre}* ({categoria}) añadido al catálogo ({precio:.2f}€), foto recortada a 1:1.",
         parse_mode="Markdown",
     )
     return ConversationHandler.END
@@ -648,35 +768,57 @@ async def contenido_no_permitido(update: Update, context: ContextTypes.DEFAULT_T
 # ---------------------------------------------------------------------
 
 SEED_PRODUCTOS = [
-    ("Pulsera clásica Negra", 2.50, "clasico_negro.png"),
-    ("Pulsera clásica Blanca", 2.50, "clasico_blanco.png"),
-    ("Pulsera clásica Roja", 2.50, "clasico_rojo.png"),
-    ("Pulsera clásica Azul", 2.50, "clasico_azul.png"),
-    ("Pulsera clásica Verde", 2.50, "clasico_verde.png"),
-    ("Pulsera clásica Amarilla", 2.50, "clasico_amarillo.png"),
-    ("Pulsera combinada Rojo/Blanco", 3.00, "combinado_rojo_blanco.png"),
-    ("Pulsera combinada Azul/Amarillo", 3.00, "combinado_azul_amarillo.png"),
-    ("Pulsera combinada Verde/Negro", 3.00, "combinado_verde_negro.png"),
-    ("Pulsera combinada Arcoíris", 3.50, "combinado_arcoiris.png"),
+    ("Pulsera clásica Negra", "Clásica", 2.50, "clasico_negro.png"),
+    ("Pulsera clásica Blanca", "Clásica", 2.50, "clasico_blanco.png"),
+    ("Pulsera clásica Roja", "Clásica", 2.50, "clasico_rojo.png"),
+    ("Pulsera clásica Azul", "Clásica", 2.50, "clasico_azul.png"),
+    ("Pulsera clásica Verde", "Clásica", 2.50, "clasico_verde.png"),
+    ("Pulsera clásica Amarilla", "Clásica", 2.50, "clasico_amarillo.png"),
+    ("Pulsera combinada Rojo/Blanco", "Combinada", 3.00, "combinado_rojo_blanco.png"),
+    ("Pulsera combinada Azul/Amarillo", "Combinada", 3.00, "combinado_azul_amarillo.png"),
+    ("Pulsera combinada Verde/Negro", "Combinada", 3.00, "combinado_verde_negro.png"),
+    ("Pulsera combinada Arcoíris", "Combinada", 3.50, "combinado_arcoiris.png"),
 ]
 
 
 def sembrar_catalogo_inicial():
     if db.contar_productos() > 0:
         return
-    for nombre, precio, archivo in SEED_PRODUCTOS:
+    for nombre, categoria, precio, archivo in SEED_PRODUCTOS:
         ruta = os.path.join(IMG_DIR, archivo)
         if os.path.exists(ruta):
-            db.add_product(nombre, precio, ruta)
+            db.add_product(nombre, precio, ruta, categoria)
 
 
 # ---------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------
 
-def main():
-    db.init_db()
-    sembrar_catalogo_inicial()
+# ---------------------------------------------------------------------
+# Segundo bot: sms_tienda_bot (solo entrega el código de verificación)
+# ---------------------------------------------------------------------
+
+async def sms_bot_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    telegram_id = update.effective_user.id
+    codigo = db.get_pendiente_codigo(telegram_id)
+    if codigo:
+        await update.message.reply_text(
+            f"📲 Tu código de verificación para *Tienda de Pulseras* es:\n\n*{codigo}*\n\n"
+            "Vuelve al chat de la tienda y escríbelo allí.",
+            parse_mode="Markdown",
+        )
+    else:
+        await update.message.reply_text(
+            "No tienes ningún código pendiente ahora mismo. Pide uno nuevo escribiendo /start "
+            "en el bot de la tienda."
+        )
+
+
+# ---------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------
+
+def construir_bot_tienda() -> Application:
     app = Application.builder().token(BOT_TOKEN).build()
 
     login_conv = ConversationHandler(
@@ -696,6 +838,10 @@ def main():
         entry_points=[CallbackQueryHandler(admin_add_start, pattern="^admin_add$")],
         states={
             ADMIN_NOMBRE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_add_nombre)],
+            ADMIN_CATEGORIA: [
+                CallbackQueryHandler(admin_categoria_callback, pattern="^(catsel_|cat_nueva$)"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, admin_categoria_texto),
+            ],
             ADMIN_PRECIO: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_add_precio)],
             ADMIN_FOTO: [MessageHandler(filters.PHOTO, admin_add_foto)],
         },
@@ -705,6 +851,7 @@ def main():
     app.add_handler(login_conv)
     app.add_handler(admin_add_conv)
     app.add_handler(CallbackQueryHandler(mostrar_catalogo, pattern="^ver_catalogo$"))
+    app.add_handler(CallbackQueryHandler(elegir_categoria_catalogo, pattern="^catview_"))
     app.add_handler(CallbackQueryHandler(ver_carrito, pattern="^ver_carrito$"))
     app.add_handler(CallbackQueryHandler(vaciar_carrito, pattern="^vaciar_carrito$"))
     app.add_handler(CallbackQueryHandler(ver_contacto, pattern="^ver_contacto$"))
@@ -718,9 +865,39 @@ def main():
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, pago_exitoso))
     # Los clientes solo pueden usar texto/botones: se avisa si mandan fotos o archivos.
     app.add_handler(MessageHandler(filters.PHOTO | filters.Document.ALL | filters.VIDEO | filters.AUDIO, contenido_no_permitido))
+    return app
 
-    logger.info("Bot iniciado...")
-    app.run_polling()
+
+def construir_bot_sms() -> Application:
+    app = Application.builder().token(SMS_BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", sms_bot_start))
+    return app
+
+
+async def main_async():
+    db.init_db()
+    sembrar_catalogo_inicial()
+
+    app_tienda = construir_bot_tienda()
+    await app_tienda.initialize()
+    await app_tienda.start()
+    await app_tienda.updater.start_polling()
+    logger.info("Bot de la tienda iniciado...")
+
+    if SMS_BOT_TOKEN:
+        app_sms = construir_bot_sms()
+        await app_sms.initialize()
+        await app_sms.start()
+        await app_sms.updater.start_polling()
+        logger.info("Bot de verificación (%s) iniciado...", SMS_BOT_USERNAME)
+    else:
+        logger.warning("SMS_BOT_TOKEN no configurado: el segundo bot no se ha iniciado.")
+
+    await asyncio.Event().wait()  # mantiene el proceso vivo indefinidamente
+
+
+def main():
+    asyncio.run(main_async())
 
 
 if __name__ == "__main__":
