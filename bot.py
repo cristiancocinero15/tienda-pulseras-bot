@@ -70,7 +70,7 @@ CONTACTO_TELEFONO = "+34 614378910"
 
 # Segundo bot (solo para mandar el código de verificación)
 SMS_BOT_TOKEN = os.environ.get("SMS_BOT_TOKEN", "")
-SMS_BOT_USERNAME = os.environ.get("SMS_BOT_USERNAME", "sms_tienda_bot")
+SMS_BOT_USERNAME = os.environ.get("SMS_BOT_USERNAME", "SMSTienda_bot")
 
 IMG_DIR = os.path.join(os.path.dirname(__file__), "imagenes")
 os.makedirs(IMG_DIR, exist_ok=True)
