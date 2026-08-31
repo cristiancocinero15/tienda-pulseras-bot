@@ -19,6 +19,7 @@ def init_db():
         """CREATE TABLE IF NOT EXISTS usuarios (
             telegram_id INTEGER PRIMARY KEY,
             username TEXT UNIQUE NOT NULL,
+            phone_number TEXT,
             is_admin INTEGER NOT NULL DEFAULT 0
         )"""
     )
@@ -64,11 +65,31 @@ def sugerir_username_libre(username: str) -> str:
     return candidato
 
 
-def create_user(telegram_id: int, username: str, is_admin: bool = False):
+def create_user(telegram_id: int, username: str, phone_number: str = None, is_admin: bool = False):
     conn = get_conn()
     conn.execute(
-        "INSERT INTO usuarios (telegram_id, username, is_admin) VALUES (?, ?, ?)",
-        (telegram_id, username, int(is_admin)),
+        "INSERT INTO usuarios (telegram_id, username, phone_number, is_admin) VALUES (?, ?, ?, ?)",
+        (telegram_id, username, phone_number, int(is_admin)),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_user_by_username(username: str):
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT * FROM usuarios WHERE username = ?", (username,)
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def update_telegram_id(username: str, new_telegram_id: int):
+    """Mueve la cuenta (con ese username) a un nuevo telegram_id (nuevo dispositivo/chat)."""
+    conn = get_conn()
+    conn.execute(
+        "UPDATE usuarios SET telegram_id = ? WHERE username = ?",
+        (new_telegram_id, username),
     )
     conn.commit()
     conn.close()
