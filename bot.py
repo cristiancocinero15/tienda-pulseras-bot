@@ -1,20 +1,20 @@
 """
 Bot de Telegram - Tienda de Pulseras
 ---------------------------------------------------------------------------
-- Al /start: si el chat ya tiene una cuenta asociada, entra directo al menú.
-  Si no, se ofrece "🆕 Crear cuenta" o "🔑 Iniciar sesión".
-    - Crear cuenta: pide nombre de usuario.
-        - Si es el nombre del admin -> pide contraseña (ADMIN_PASSWORD).
-        - Si el nombre ya está cogido -> sugiere uno libre (con número).
-        - Si es un nombre libre normal -> pide compartir el número de
-          teléfono de Telegram (gratis, verificado por Telegram) y crea la cuenta.
-    - Iniciar sesión (para mover la cuenta a otro dispositivo/chat): pide el
-      nombre de usuario y, si no es el admin, pide compartir el número de
-      teléfono para comprobar que coincide con el registrado.
-- Catálogo dinámico guardado en base de datos (tienda.db).
-- Solo el admin puede añadir productos (nombre, precio y foto).
-- Los clientes solo pueden ver catálogo, carrito y hacer pedidos (no editan nada).
-- Ubicación: se valida en silencio contra el radio de Vinaròs (1 km).
+- /start: si la sesión está activa, entra directo al menú. Si no, ofrece
+  "🆕 Crear cuenta" o "🔑 Iniciar sesión".
+- Registro: nombre de usuario -> (admin: contraseña / normal: escribir el
+  teléfono con prefijo de país, ej. +34612345678) -> confirmar con un botón
+  "✅ Crear" -> se borra el mensaje de confirmación y se muestra el menú.
+- 🚪 Cerrar sesión: disponible para cliente y admin. Al cerrar sesión hay
+  que volver a iniciar sesión (usuario + teléfono, o contraseña si es admin).
+- Admin: puede ver la lista de usuarios (SIN el teléfono) y añadir productos
+  (nombre, precio, foto - se recorta automáticamente a cuadrado 1:1).
+- Los clientes solo pueden usar el chat de texto / los botones: no se
+  aceptan fotos ni archivos de su parte.
+- Ubicación: validación silenciosa contra el radio de Vinaròs (1 km).
+- Nota: Telegram no permite a un bot impedir que un usuario borre su propio
+  chat; eso lo controla el cliente de Telegram de cada persona, no el bot.
 
 Variables de entorno necesarias:
     BOT_TOKEN        -> token de @BotFather
@@ -23,10 +23,13 @@ Variables de entorno necesarias:
     ADMIN_PASSWORD    -> contraseña del admin (NUNCA la subas al código/GitHub)
 """
 
+import io
 import logging
 import math
 import os
+import re
 
+from PIL import Image
 from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -58,7 +61,7 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 PROVIDER_TOKEN = os.environ.get("PROVIDER_TOKEN", "")
 ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "cristiancocinero15")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
-CONTACTO_TELEFONO = "614378910"
+CONTACTO_TELEFONO = "+34 614378910"
 
 IMG_DIR = os.path.join(os.path.dirname(__file__), "imagenes")
 os.makedirs(IMG_DIR, exist_ok=True)
@@ -67,9 +70,11 @@ VINAROS_LAT = 40.4676
 VINAROS_LON = 0.4753
 RADIO_MAXIMO_KM = 1.0
 
+TELEFONO_REGEX = re.compile(r"^\+\d{8,15}$")
+
 # Estados de conversación
-(CHOOSE_ACCION, ASK_USERNAME, ASK_PASSWORD_ADMIN, CONFIRM_ALT_USERNAME, ASK_PHONE,
- ADMIN_NOMBRE, ADMIN_PRECIO, ADMIN_FOTO) = range(8)
+(CHOOSE_ACCION, ASK_USERNAME, ASK_PASSWORD_ADMIN, CONFIRM_ALT_USERNAME,
+ ASK_PHONE, CONFIRM_PHONE, ADMIN_NOMBRE, ADMIN_PRECIO, ADMIN_FOTO) = range(9)
 
 
 # ---------------------------------------------------------------------
@@ -83,6 +88,19 @@ def distancia_km(lat1, lon1, lat2, lon2) -> float:
     dlambda = math.radians(lon2 - lon1)
     a = math.sin(dphi / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dlambda / 2) ** 2
     return 2 * R * math.asin(math.sqrt(a))
+
+
+def recortar_cuadrada(datos: bytes) -> bytes:
+    """Recorta la imagen al centro para que quede cuadrada (1:1)."""
+    img = Image.open(io.BytesIO(datos)).convert("RGB")
+    w, h = img.size
+    lado = min(w, h)
+    izq = (w - lado) // 2
+    arriba = (h - lado) // 2
+    recorte = img.crop((izq, arriba, izq + lado, arriba + lado))
+    salida = io.BytesIO()
+    recorte.save(salida, format="JPEG", quality=90)
+    return salida.getvalue()
 
 
 def get_cart(context: ContextTypes.DEFAULT_TYPE) -> dict:
@@ -108,12 +126,24 @@ def menu_principal_kb(es_admin: bool) -> InlineKeyboardMarkup:
     ]
     if es_admin:
         filas.append([InlineKeyboardButton("➕ Añadir producto (admin)", callback_data="admin_add")])
+        filas.append([InlineKeyboardButton("👥 Ver usuarios (admin)", callback_data="admin_usuarios")])
+    filas.append([InlineKeyboardButton("🚪 Cerrar sesión", callback_data="cerrar_sesion")])
     return InlineKeyboardMarkup(filas)
 
 
 async def enviar_menu(chat_id, context, es_admin, saludo=""):
-    texto = saludo + "\n\n¿Qué quieres hacer?" if saludo else "¿Qué quieres hacer?"
-    await context.bot.send_message(chat_id, texto, reply_markup=menu_principal_kb(es_admin), )
+    """Envía el menú como mensaje NUEVO (se usa cuando no hay un mensaje de callback que editar)."""
+    texto = (saludo + "\n\n¿Qué quieres hacer?") if saludo else "¿Qué quieres hacer?"
+    await context.bot.send_message(chat_id, texto, reply_markup=menu_principal_kb(es_admin))
+
+
+async def editar_a_menu(query, es_admin, saludo=""):
+    """Convierte el mensaje del botón pulsado directamente en el menú (evita mandar mensajes de más)."""
+    texto = (saludo + "\n\n¿Qué quieres hacer?") if saludo else "¿Qué quieres hacer?"
+    try:
+        await query.edit_message_text(texto, reply_markup=menu_principal_kb(es_admin))
+    except Exception:
+        await query.message.reply_text(texto, reply_markup=menu_principal_kb(es_admin))
 
 
 # ---------------------------------------------------------------------
@@ -138,8 +168,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
     )
     await update.message.reply_text(
-        "👋 Bienvenido a *Tienda de Pulseras*.\n\n"
-        "¿Ya tienes cuenta o eres nuevo?",
+        "👋 Bienvenido a *Tienda de Pulseras*.\n\n¿Ya tienes cuenta o eres nuevo?",
         parse_mode="Markdown",
         reply_markup=kb,
     )
@@ -150,8 +179,7 @@ async def elegir_accion(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     context.user_data["auth_purpose"] = "signup" if query.data == "accion_crear" else "login"
-
-    await context.bot.send_message(query.message.chat_id, "Escribe tu nombre de usuario:")
+    await query.edit_message_text("Escribe tu nombre de usuario:")
     return ASK_USERNAME
 
 
@@ -160,7 +188,6 @@ async def recibir_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
     purpose = context.user_data.get("auth_purpose", "signup")
     context.user_data["pending_username"] = username
 
-    # --- Caso admin (mismo flujo tanto para crear como para iniciar sesión) ---
     if username == ADMIN_USERNAME:
         if not ADMIN_PASSWORD:
             await update.message.reply_text(
@@ -170,7 +197,6 @@ async def recibir_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🔒 Ese usuario es el admin. Escribe la contraseña:")
         return ASK_PASSWORD_ADMIN
 
-    # --- Iniciar sesión con un usuario normal ---
     if purpose == "login":
         usuario = db.get_user_by_username(username)
         if not usuario:
@@ -179,17 +205,11 @@ async def recibir_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "y elige '🆕 Crear cuenta'."
             )
             return ConversationHandler.END
-        kb = ReplyKeyboardMarkup(
-            [[KeyboardButton("📱 Compartir mi número", request_contact=True)]],
-            resize_keyboard=True, one_time_keyboard=True,
-        )
         await update.message.reply_text(
-            "Para confirmar que eres tú, comparte tu número de teléfono:",
-            reply_markup=kb,
+            "Escribe tu número de teléfono con el prefijo de país (ej: +34612345678):"
         )
         return ASK_PHONE
 
-    # --- Crear cuenta con un usuario normal ---
     if db.username_exists(username):
         sugerido = db.sugerir_username_libre(username)
         context.user_data["pending_username"] = sugerido
@@ -206,13 +226,8 @@ async def recibir_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return CONFIRM_ALT_USERNAME
 
-    kb = ReplyKeyboardMarkup(
-        [[KeyboardButton("📱 Compartir mi número", request_contact=True)]],
-        resize_keyboard=True, one_time_keyboard=True,
-    )
     await update.message.reply_text(
-        "Para terminar el registro, comparte tu número de teléfono:",
-        reply_markup=kb,
+        "Escribe tu número de teléfono con el prefijo de país (ej: +34612345678):"
     )
     return ASK_PHONE
 
@@ -240,66 +255,93 @@ async def confirmar_username_alternativo(update: Update, context: ContextTypes.D
     await query.answer()
 
     if query.data == "alt_si":
-        kb = ReplyKeyboardMarkup(
-            [[KeyboardButton("📱 Compartir mi número", request_contact=True)]],
-            resize_keyboard=True, one_time_keyboard=True,
-        )
-        await context.bot.send_message(
-            query.message.chat_id,
-            "Para terminar el registro, comparte tu número de teléfono:",
-            reply_markup=kb,
+        await query.edit_message_text(
+            "Escribe tu número de teléfono con el prefijo de país (ej: +34612345678):"
         )
         return ASK_PHONE
 
-    await context.bot.send_message(
-        query.message.chat_id,
+    await query.edit_message_text(
         "De acuerdo, no se ha creado el usuario. Contacta con el admin "
         f"(@{ADMIN_USERNAME} · ☎️ {CONTACTO_TELEFONO}) para que te asigne uno. "
-        "Cuando lo tengas, escribe /start otra vez.",
+        "Cuando lo tengas, escribe /start otra vez."
     )
     return ConversationHandler.END
 
 
 async def recibir_telefono(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    contacto = update.message.contact
-    telegram_id = update.effective_user.id
-    purpose = context.user_data.get("auth_purpose", "signup")
-    username = context.user_data.get("pending_username")
+    telefono = update.message.text.strip().replace(" ", "")
 
-    if not contacto or contacto.user_id != telegram_id:
+    if not TELEFONO_REGEX.match(telefono):
         await update.message.reply_text(
-            "Tienes que compartir *tu propio* número (usando el botón), no el de otra persona.",
-            parse_mode="Markdown",
+            "Formato no válido. Escríbelo con el prefijo de país, ej: +34612345678"
         )
         return ASK_PHONE
 
-    telefono = contacto.phone_number
+    context.user_data["pending_phone"] = telefono
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Crear", callback_data="phone_confirmar")]])
+    await update.message.reply_text(
+        f"¿Confirmas que tu número es *{telefono}*?", parse_mode="Markdown", reply_markup=kb
+    )
+    return CONFIRM_PHONE
+
+
+async def confirmar_telefono(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    telegram_id = update.effective_user.id
+    purpose = context.user_data.get("auth_purpose", "signup")
+    username = context.user_data.get("pending_username")
+    telefono = context.user_data.get("pending_phone")
 
     if purpose == "login":
         usuario = db.get_user_by_username(username)
         if usuario and usuario["phone_number"] == telefono:
             db.update_telegram_id(username, telegram_id)
-            await enviar_menu(
-                update.effective_chat.id, context, False,
-                "✅ Número verificado. Sesión iniciada.",
-            )
+            mensaje_ok = "✅ Número verificado. Sesión iniciada."
+            es_admin_flag = bool(usuario["is_admin"])
         else:
-            await update.message.reply_text(
+            try:
+                await query.message.delete()
+            except Exception:
+                pass
+            await context.bot.send_message(
+                query.message.chat_id,
                 "❌ Ese número no coincide con el registrado para esa cuenta. "
                 f"Contacta con el admin (☎️ {CONTACTO_TELEFONO}) si necesitas ayuda.",
-                reply_markup=ReplyKeyboardRemove(),
             )
-        return ConversationHandler.END
+            return ConversationHandler.END
+    else:
+        db.create_user(telegram_id, username, phone_number=telefono, is_admin=False)
+        mensaje_ok = f"✅ Usuario *{username}* creado."
+        es_admin_flag = False
 
-    # purpose == "signup"
-    db.create_user(telegram_id, username, phone_number=telefono, is_admin=False)
-    await enviar_menu(update.effective_chat.id, context, False, f"✅ Usuario *{username}* creado.")
+    # Se borra el mensaje de confirmación y se pasa al menú, como pediste.
+    try:
+        await query.message.delete()
+    except Exception:
+        pass
+    await enviar_menu(query.message.chat_id, context, es_admin_flag, mensaje_ok)
     return ConversationHandler.END
 
 
 async def cancelar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Operación cancelada.", reply_markup=ReplyKeyboardRemove())
     return ConversationHandler.END
+
+
+# ---------------------------------------------------------------------
+# Cerrar sesión
+# ---------------------------------------------------------------------
+
+async def cerrar_sesion(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer("Sesión cerrada")
+    db.set_activa(update.effective_user.id, False)
+    context.user_data.clear()
+    await query.edit_message_text(
+        "🚪 Sesión cerrada. Escribe /start cuando quieras volver a entrar."
+    )
 
 
 # ---------------------------------------------------------------------
@@ -313,10 +355,10 @@ async def mostrar_catalogo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     productos = db.get_products()
     if not productos:
-        await context.bot.send_message(chat_id, "Todavía no hay productos en el catálogo.")
+        await query.edit_message_text("Todavía no hay productos en el catálogo.")
         return
 
-    await context.bot.send_message(chat_id, "Aquí tienes el catálogo 👇")
+    await query.edit_message_text("Aquí tienes el catálogo 👇")
     for prod in productos:
         kb = InlineKeyboardMarkup(
             [[InlineKeyboardButton(f"➕ Añadir · {prod['precio']:.2f}€", callback_data=f"add_{prod['id']}")]]
@@ -363,10 +405,10 @@ async def ver_carrito(update: Update, context: ContextTypes.DEFAULT_TYPE):
         botones.append([InlineKeyboardButton("🧾 Finalizar pedido", callback_data="checkout")])
         botones.append([InlineKeyboardButton("🗑️ Vaciar carrito", callback_data="vaciar_carrito")])
     botones.append([InlineKeyboardButton("🎨 Seguir comprando", callback_data="ver_catalogo")])
+    botones.append([InlineKeyboardButton("⬅️ Menú", callback_data="volver_menu")])
 
-    await context.bot.send_message(
-        query.message.chat_id, texto_carrito(cart), parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(botones),
+    await query.edit_message_text(
+        texto_carrito(cart), parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(botones)
     )
 
 
@@ -374,15 +416,24 @@ async def vaciar_carrito(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     context.user_data["cart"] = {}
     await query.answer("Carrito vaciado 🗑️")
+    await ver_carrito(update, context)
 
 
 async def ver_contacto(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    await context.bot.send_message(
-        query.message.chat_id,
-        f"📞 Contacto: {CONTACTO_TELEFONO}\n👤 Admin: @{ADMIN_USERNAME}",
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Menú", callback_data="volver_menu")]])
+    await query.edit_message_text(
+        f"📞 Contacto: {CONTACTO_TELEFONO}\n👤 Admin: @{ADMIN_USERNAME}", reply_markup=kb
     )
+
+
+async def volver_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    usuario = db.get_user(update.effective_user.id)
+    es_admin_flag = bool(usuario["is_admin"]) if usuario else False
+    await editar_a_menu(query, es_admin_flag)
 
 
 # --- Checkout / ubicación ---
@@ -459,12 +510,30 @@ async def pago_exitoso(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ---------------------------------------------------------------------
-# Admin: añadir producto (nombre -> precio -> foto)
+# Admin: usuarios y productos
 # ---------------------------------------------------------------------
 
 async def es_admin(update: Update) -> bool:
     usuario = db.get_user(update.effective_user.id)
     return bool(usuario and usuario["is_admin"])
+
+
+async def admin_ver_usuarios(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not await es_admin(update):
+        await query.answer("Solo el admin puede ver esto.", show_alert=True)
+        return
+    await query.answer()
+
+    usuarios = db.get_all_users()
+    lineas = ["👥 *Usuarios registrados:*\n"]
+    for u in usuarios:
+        etiqueta = " (admin)" if u["is_admin"] else ""
+        estado = "" if u["activa"] else " · sesión cerrada"
+        lineas.append(f"• {u['username']}{etiqueta}{estado}")
+
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Menú", callback_data="volver_menu")]])
+    await query.edit_message_text("\n".join(lineas), parse_mode="Markdown", reply_markup=kb)
 
 
 async def admin_add_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -473,7 +542,7 @@ async def admin_add_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("Solo el admin puede añadir productos.", show_alert=True)
         return ConversationHandler.END
     await query.answer()
-    await context.bot.send_message(query.message.chat_id, "Nombre del nuevo producto:")
+    await query.edit_message_text("Nombre del nuevo producto:")
     return ADMIN_NOMBRE
 
 
@@ -490,7 +559,10 @@ async def admin_add_precio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Precio no válido, escribe solo un número, ej. 3.50:")
         return ADMIN_PRECIO
     context.user_data["nuevo_producto_precio"] = precio
-    await update.message.reply_text("Envía ahora la *foto* del producto:", parse_mode="Markdown")
+    await update.message.reply_text(
+        "Envía ahora la *foto* del producto (se recortará a cuadrada 1:1 automáticamente):",
+        parse_mode="Markdown",
+    )
     return ADMIN_FOTO
 
 
@@ -498,6 +570,7 @@ async def admin_add_foto(update: Update, context: ContextTypes.DEFAULT_TYPE):
     foto = update.message.photo[-1]
     archivo = await foto.get_file()
     datos = bytes(await archivo.download_as_bytearray())
+    datos_cuadrados = recortar_cuadrada(datos)
 
     nombre = context.user_data["nuevo_producto_nombre"]
     precio = context.user_data["nuevo_producto_precio"]
@@ -505,15 +578,29 @@ async def admin_add_foto(update: Update, context: ContextTypes.DEFAULT_TYPE):
     nombre_archivo = f"{nombre.lower().replace(' ', '_')}_{foto.file_unique_id}.jpg"
     ruta = os.path.join(IMG_DIR, nombre_archivo)
     with open(ruta, "wb") as f:
-        f.write(datos)
+        f.write(datos_cuadrados)
 
     db.add_product(nombre, precio, ruta)
 
     await update.message.reply_text(
-        f"✅ Producto *{nombre}* añadido al catálogo ({precio:.2f}€).",
+        f"✅ Producto *{nombre}* añadido al catálogo ({precio:.2f}€), foto recortada a 1:1.",
         parse_mode="Markdown",
     )
     return ConversationHandler.END
+
+
+# --- Los clientes solo pueden usar chat de texto: nada de fotos/archivos ---
+
+async def contenido_no_permitido(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if await es_admin(update):
+        await update.message.reply_text(
+            "Para añadir un producto usa el botón '➕ Añadir producto' del menú."
+        )
+    else:
+        await update.message.reply_text(
+            "Solo puedo atender pedidos por chat de texto o los botones del menú. "
+            "No se aceptan fotos ni archivos aquí."
+        )
 
 
 # ---------------------------------------------------------------------
@@ -559,7 +646,8 @@ def main():
             ASK_USERNAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, recibir_username)],
             ASK_PASSWORD_ADMIN: [MessageHandler(filters.TEXT & ~filters.COMMAND, recibir_password_admin)],
             CONFIRM_ALT_USERNAME: [CallbackQueryHandler(confirmar_username_alternativo, pattern="^alt_")],
-            ASK_PHONE: [MessageHandler(filters.CONTACT, recibir_telefono)],
+            ASK_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, recibir_telefono)],
+            CONFIRM_PHONE: [CallbackQueryHandler(confirmar_telefono, pattern="^phone_confirmar$")],
         },
         fallbacks=[CommandHandler("cancelar", cancelar)],
     )
@@ -580,11 +668,16 @@ def main():
     app.add_handler(CallbackQueryHandler(ver_carrito, pattern="^ver_carrito$"))
     app.add_handler(CallbackQueryHandler(vaciar_carrito, pattern="^vaciar_carrito$"))
     app.add_handler(CallbackQueryHandler(ver_contacto, pattern="^ver_contacto$"))
+    app.add_handler(CallbackQueryHandler(volver_menu, pattern="^volver_menu$"))
+    app.add_handler(CallbackQueryHandler(cerrar_sesion, pattern="^cerrar_sesion$"))
+    app.add_handler(CallbackQueryHandler(admin_ver_usuarios, pattern="^admin_usuarios$"))
     app.add_handler(CallbackQueryHandler(pedir_ubicacion, pattern="^checkout$"))
     app.add_handler(CallbackQueryHandler(anadir_al_carrito, pattern="^add_"))
     app.add_handler(MessageHandler(filters.LOCATION, recibir_ubicacion))
     app.add_handler(PreCheckoutQueryHandler(precheckout_callback))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, pago_exitoso))
+    # Los clientes solo pueden usar texto/botones: se avisa si mandan fotos o archivos.
+    app.add_handler(MessageHandler(filters.PHOTO | filters.Document.ALL | filters.VIDEO | filters.AUDIO, contenido_no_permitido))
 
     logger.info("Bot iniciado...")
     app.run_polling()
