@@ -20,7 +20,8 @@ def init_db():
             telegram_id INTEGER PRIMARY KEY,
             username TEXT UNIQUE NOT NULL,
             phone_number TEXT,
-            is_admin INTEGER NOT NULL DEFAULT 0
+            is_admin INTEGER NOT NULL DEFAULT 0,
+            activa INTEGER NOT NULL DEFAULT 1
         )"""
     )
     conn.execute(
@@ -38,12 +39,32 @@ def init_db():
 # --- Usuarios ---
 
 def get_user(telegram_id: int):
+    """Solo devuelve el usuario si su sesión está activa (no ha cerrado sesión)."""
     conn = get_conn()
     row = conn.execute(
-        "SELECT * FROM usuarios WHERE telegram_id = ?", (telegram_id,)
+        "SELECT * FROM usuarios WHERE telegram_id = ? AND activa = 1", (telegram_id,)
     ).fetchone()
     conn.close()
     return dict(row) if row else None
+
+
+def set_activa(telegram_id: int, activa: bool):
+    conn = get_conn()
+    conn.execute(
+        "UPDATE usuarios SET activa = ? WHERE telegram_id = ?", (int(activa), telegram_id)
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_all_users():
+    """Lista de usuarios SIN el número de teléfono (privacidad)."""
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT username, is_admin, activa FROM usuarios ORDER BY username"
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
 
 
 def username_exists(username: str) -> bool:
@@ -85,10 +106,10 @@ def get_user_by_username(username: str):
 
 
 def update_telegram_id(username: str, new_telegram_id: int):
-    """Mueve la cuenta (con ese username) a un nuevo telegram_id (nuevo dispositivo/chat)."""
+    """Mueve la cuenta (con ese username) a un nuevo telegram_id y reactiva la sesión."""
     conn = get_conn()
     conn.execute(
-        "UPDATE usuarios SET telegram_id = ? WHERE username = ?",
+        "UPDATE usuarios SET telegram_id = ?, activa = 1 WHERE username = ?",
         (new_telegram_id, username),
     )
     conn.commit()
