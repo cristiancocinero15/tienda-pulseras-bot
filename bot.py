@@ -1,11 +1,13 @@
 """
 Bot de Telegram - Tienda de Pulseras
 ---------------------------------------------------------------------------
-- /start: si la sesión está activa, entra directo al menú. Si no, ofrece
-  "🆕 Crear cuenta" o "🔑 Iniciar sesión".
+- /start: se borra el mensaje anterior del bot y el propio /start para que
+  el chat quede limpio. Si la sesión está activa, entra directo al menú.
+  Si no, ofrece "🆕 Crear cuenta" o "🔑 Iniciar sesión".
 - Registro: nombre de usuario -> (admin: contraseña / normal: escribir el
-  teléfono con prefijo de país, ej. +34612345678) -> confirmar con un botón
-  "✅ Crear" -> se borra el mensaje de confirmación y se muestra el menú.
+  teléfono con prefijo de país, ej. +34612345678) -> el bot envía un código
+  de verificación (3 letras mayúsculas + 3 números, aleatorio) que hay que
+  escribir para confirmar -> se borra el código y se muestra el menú.
 - 🚪 Cerrar sesión: disponible para cliente y admin. Al cerrar sesión hay
   que volver a iniciar sesión (usuario + teléfono, o contraseña si es admin).
 - Admin: puede ver la lista de usuarios (SIN el teléfono) y añadir productos
@@ -27,7 +29,9 @@ import io
 import logging
 import math
 import os
+import random
 import re
+import string
 
 from PIL import Image
 from telegram import (
@@ -103,6 +107,13 @@ def recortar_cuadrada(datos: bytes) -> bytes:
     return salida.getvalue()
 
 
+def generar_codigo_verificacion() -> str:
+    """Código de verificación: 3 letras mayúsculas + 3 números, aleatorio."""
+    letras = "".join(random.choices(string.ascii_uppercase, k=3))
+    numeros = "".join(random.choices(string.digits, k=3))
+    return letras + numeros
+
+
 def get_cart(context: ContextTypes.DEFAULT_TYPE) -> dict:
     if "cart" not in context.user_data:
         context.user_data["cart"] = {}
@@ -134,7 +145,8 @@ def menu_principal_kb(es_admin: bool) -> InlineKeyboardMarkup:
 async def enviar_menu(chat_id, context, es_admin, saludo=""):
     """Envía el menú como mensaje NUEVO (se usa cuando no hay un mensaje de callback que editar)."""
     texto = (saludo + "\n\n¿Qué quieres hacer?") if saludo else "¿Qué quieres hacer?"
-    await context.bot.send_message(chat_id, texto, reply_markup=menu_principal_kb(es_admin))
+    msg = await context.bot.send_message(chat_id, texto, reply_markup=menu_principal_kb(es_admin))
+    context.user_data["last_menu_msg_id"] = msg.message_id
 
 
 async def editar_a_menu(query, es_admin, saludo=""):
@@ -152,11 +164,25 @@ async def editar_a_menu(query, es_admin, saludo=""):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     telegram_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+
+    # Limpieza: se borra el mensaje anterior del bot (menú/código, etc.) y el propio /start.
+    ultimo_msg_id = context.user_data.get("last_menu_msg_id")
+    if ultimo_msg_id:
+        try:
+            await context.bot.delete_message(chat_id, ultimo_msg_id)
+        except Exception:
+            pass
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
+
     usuario = db.get_user(telegram_id)
 
     if usuario:
         await enviar_menu(
-            update.effective_chat.id, context, bool(usuario["is_admin"]),
+            chat_id, context, bool(usuario["is_admin"]),
             f"👋 ¡Hola de nuevo, {usuario['username']}!",
         )
         return ConversationHandler.END
@@ -167,11 +193,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("🔑 Iniciar sesión", callback_data="accion_login")],
         ]
     )
-    await update.message.reply_text(
+    msg = await context.bot.send_message(
+        chat_id,
         "👋 Bienvenido a *Tienda de Pulseras*.\n\n¿Ya tienes cuenta o eres nuevo?",
         parse_mode="Markdown",
         reply_markup=kb,
     )
+    context.user_data["last_menu_msg_id"] = msg.message_id
     return CHOOSE_ACCION
 
 
@@ -278,16 +306,26 @@ async def recibir_telefono(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ASK_PHONE
 
     context.user_data["pending_phone"] = telefono
-    kb = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Crear", callback_data="phone_confirmar")]])
-    await update.message.reply_text(
-        f"¿Confirmas que tu número es *{telefono}*?", parse_mode="Markdown", reply_markup=kb
+    codigo = generar_codigo_verificacion()
+    context.user_data["verification_code"] = codigo
+
+    msg = await update.message.reply_text(
+        f"📲 Tu código de verificación es: *{codigo}*\n\n"
+        "Escríbelo aquí para confirmar que este número es tuyo.",
+        parse_mode="Markdown",
     )
+    context.user_data["code_msg_id"] = msg.message_id
     return CONFIRM_PHONE
 
 
-async def confirmar_telefono(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
+async def confirmar_codigo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    codigo_escrito = update.message.text.strip().upper()
+    codigo_esperado = context.user_data.get("verification_code")
+    chat_id = update.effective_chat.id
+
+    if codigo_escrito != codigo_esperado:
+        await update.message.reply_text("❌ Código incorrecto. Vuelve a escribirlo:")
+        return CONFIRM_PHONE
 
     telegram_id = update.effective_user.id
     purpose = context.user_data.get("auth_purpose", "signup")
@@ -301,14 +339,9 @@ async def confirmar_telefono(update: Update, context: ContextTypes.DEFAULT_TYPE)
             mensaje_ok = "✅ Número verificado. Sesión iniciada."
             es_admin_flag = bool(usuario["is_admin"])
         else:
-            try:
-                await query.message.delete()
-            except Exception:
-                pass
-            await context.bot.send_message(
-                query.message.chat_id,
+            await update.message.reply_text(
                 "❌ Ese número no coincide con el registrado para esa cuenta. "
-                f"Contacta con el admin (☎️ {CONTACTO_TELEFONO}) si necesitas ayuda.",
+                f"Contacta con el admin (☎️ {CONTACTO_TELEFONO}) si necesitas ayuda."
             )
             return ConversationHandler.END
     else:
@@ -316,12 +349,19 @@ async def confirmar_telefono(update: Update, context: ContextTypes.DEFAULT_TYPE)
         mensaje_ok = f"✅ Usuario *{username}* creado."
         es_admin_flag = False
 
-    # Se borra el mensaje de confirmación y se pasa al menú, como pediste.
+    # Limpieza: se borra el mensaje del código y el que escribió el usuario.
+    code_msg_id = context.user_data.get("code_msg_id")
+    if code_msg_id:
+        try:
+            await context.bot.delete_message(chat_id, code_msg_id)
+        except Exception:
+            pass
     try:
-        await query.message.delete()
+        await update.message.delete()
     except Exception:
         pass
-    await enviar_menu(query.message.chat_id, context, es_admin_flag, mensaje_ok)
+
+    await enviar_menu(chat_id, context, es_admin_flag, mensaje_ok)
     return ConversationHandler.END
 
 
@@ -647,7 +687,7 @@ def main():
             ASK_PASSWORD_ADMIN: [MessageHandler(filters.TEXT & ~filters.COMMAND, recibir_password_admin)],
             CONFIRM_ALT_USERNAME: [CallbackQueryHandler(confirmar_username_alternativo, pattern="^alt_")],
             ASK_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, recibir_telefono)],
-            CONFIRM_PHONE: [CallbackQueryHandler(confirmar_telefono, pattern="^phone_confirmar$")],
+            CONFIRM_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, confirmar_codigo)],
         },
         fallbacks=[CommandHandler("cancelar", cancelar)],
     )
