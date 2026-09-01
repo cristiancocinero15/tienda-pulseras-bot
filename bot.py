@@ -849,8 +849,9 @@ async def sms_bot_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if codigo:
         msg = await update.message.reply_text(
             f"📲 Tu código de verificación para *Tienda de Pulseras* es:\n\n*{codigo}*\n\n"
-            "Vuelve al bot de la tienda y escríbelo allí, o usa aquí mismo:\n"
-            f"`/sync {codigo}`",
+            "Vuelve al bot de la tienda y escríbelo allí, o verifica aquí mismo con:\n"
+            "• `/auto` (verificación automática, sin escribir nada)\n"
+            f"• `/sync {codigo}`",
             parse_mode="Markdown",
         )
         db.set_mensaje_sms(telegram_id, msg.message_id)
@@ -890,28 +891,11 @@ async def sms_bot_restart(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db.set_mensaje_sms(telegram_id, msg.message_id)
 
 
-async def sms_bot_sync(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Verifica el código escrito como '/sync CÓDIGO' y, si es correcto, completa
-    el registro/inicio de sesión sin tener que volver al bot de la tienda a escribirlo."""
+async def _completar_y_notificar(update: Update, context: ContextTypes.DEFAULT_TYPE, pendiente: dict):
+    """Completa la verificación, borra los mensajes de los dos bots y avisa/muestra el
+    menú en el bot de la tienda. La usan tanto /sync como /auto."""
     telegram_id = update.effective_user.id
     chat_id = update.effective_chat.id
-
-    if not context.args:
-        await update.message.reply_text("Escríbelo así: /sync CÓDIGO")
-        return
-
-    codigo_escrito = context.args[0].strip().upper()
-    pendiente = db.get_pendiente(telegram_id)
-
-    if not pendiente:
-        await update.message.reply_text(
-            "No tienes ninguna verificación pendiente. Pide una nueva con /start en el bot de la tienda."
-        )
-        return
-
-    if codigo_escrito != pendiente["codigo"]:
-        await update.message.reply_text("❌ Código incorrecto. Usa /restart para pedir uno nuevo.")
-        return
 
     ok, mensaje_resultado, es_admin_flag = await completar_verificacion(telegram_id, pendiente)
 
@@ -939,6 +923,45 @@ async def sms_bot_sync(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if TIENDA_BOT_APP:
         menu_msg = await enviar_menu_bot(TIENDA_BOT_APP.bot, telegram_id, es_admin_flag, mensaje_resultado)
         TIENDA_BOT_APP.user_data[telegram_id]["last_menu_msg_id"] = menu_msg.message_id
+
+
+async def sms_bot_sync(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Verifica el código escrito como '/sync CÓDIGO' y, si es correcto, completa
+    el registro/inicio de sesión sin tener que volver al bot de la tienda a escribirlo."""
+    telegram_id = update.effective_user.id
+
+    if not context.args:
+        await update.message.reply_text("Escríbelo así: /sync CÓDIGO")
+        return
+
+    codigo_escrito = context.args[0].strip().upper()
+    pendiente = db.get_pendiente(telegram_id)
+
+    if not pendiente:
+        await update.message.reply_text(
+            "No tienes ninguna verificación pendiente. Pide una nueva con /start en el bot de la tienda."
+        )
+        return
+
+    if codigo_escrito != pendiente["codigo"]:
+        await update.message.reply_text("❌ Código incorrecto. Usa /restart para pedir uno nuevo.")
+        return
+
+    await _completar_y_notificar(update, context, pendiente)
+
+
+async def sms_bot_auto(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Verifica automáticamente con el código que ya está pendiente, sin tener que escribirlo."""
+    telegram_id = update.effective_user.id
+    pendiente = db.get_pendiente(telegram_id)
+
+    if not pendiente:
+        await update.message.reply_text(
+            "No tienes ninguna verificación pendiente. Pide una nueva con /start en el bot de la tienda."
+        )
+        return
+
+    await _completar_y_notificar(update, context, pendiente)
 
 
 async def sms_bot_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1026,6 +1049,7 @@ def construir_bot_sms() -> Application:
     app.add_handler(CommandHandler("start", sms_bot_start))
     app.add_handler(CommandHandler("restart", sms_bot_restart))
     app.add_handler(CommandHandler("sync", sms_bot_sync))
+    app.add_handler(CommandHandler("auto", sms_bot_auto))
     app.add_handler(CommandHandler("clear", sms_bot_clear))
     # Cualquier otra cosa que escriban o manden (texto, fotos, archivos...) se ignora/borra.
     app.add_handler(MessageHandler(~filters.COMMAND, sms_bot_ignorar))
