@@ -37,6 +37,7 @@ def init_db():
         """CREATE TABLE IF NOT EXISTS pendientes_verificacion (
             telegram_id INTEGER PRIMARY KEY,
             codigo TEXT NOT NULL,
+            mensaje_id_sms INTEGER,
             creado_en TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )"""
     )
@@ -127,23 +128,40 @@ def update_telegram_id(username: str, new_telegram_id: int):
 # --- Verificación (compartida entre el bot principal y el bot de SMS) ---
 
 def set_pendiente(telegram_id: int, codigo: str):
+    """Crea/reemplaza el código pendiente. Invalida cualquier mensaje anterior del bot de SMS."""
     conn = get_conn()
     conn.execute(
-        "INSERT INTO pendientes_verificacion (telegram_id, codigo) VALUES (?, ?) "
-        "ON CONFLICT(telegram_id) DO UPDATE SET codigo = excluded.codigo, creado_en = CURRENT_TIMESTAMP",
+        "INSERT INTO pendientes_verificacion (telegram_id, codigo, mensaje_id_sms) VALUES (?, ?, NULL) "
+        "ON CONFLICT(telegram_id) DO UPDATE SET codigo = excluded.codigo, mensaje_id_sms = NULL, "
+        "creado_en = CURRENT_TIMESTAMP",
         (telegram_id, codigo),
     )
     conn.commit()
     conn.close()
 
 
-def get_pendiente_codigo(telegram_id: int):
+def set_mensaje_sms(telegram_id: int, mensaje_id: int):
+    conn = get_conn()
+    conn.execute(
+        "UPDATE pendientes_verificacion SET mensaje_id_sms = ? WHERE telegram_id = ?",
+        (mensaje_id, telegram_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_pendiente(telegram_id: int):
     conn = get_conn()
     row = conn.execute(
-        "SELECT codigo FROM pendientes_verificacion WHERE telegram_id = ?", (telegram_id,)
+        "SELECT * FROM pendientes_verificacion WHERE telegram_id = ?", (telegram_id,)
     ).fetchone()
     conn.close()
-    return row["codigo"] if row else None
+    return dict(row) if row else None
+
+
+def get_pendiente_codigo(telegram_id: int):
+    pendiente = get_pendiente(telegram_id)
+    return pendiente["codigo"] if pendiente else None
 
 
 def borrar_pendiente(telegram_id: int):

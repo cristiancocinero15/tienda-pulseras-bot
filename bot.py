@@ -315,6 +315,24 @@ async def confirmar_username_alternativo(update: Update, context: ContextTypes.D
     return ConversationHandler.END
 
 
+async def enviar_solicitud_codigo(chat_id, context, telegram_id):
+    """Genera un código nuevo, invalida el anterior, y manda el botón + instrucción clara."""
+    codigo = generar_codigo_verificacion()
+    db.set_pendiente(telegram_id, codigo)
+
+    kb = InlineKeyboardMarkup(
+        [[InlineKeyboardButton("📲 Ir a verificar", url=f"https://t.me/{SMS_BOT_USERNAME}?start=verificar")]]
+    )
+    msg = await context.bot.send_message(
+        chat_id,
+        f"Pulsa el botón para hablar con @{SMS_BOT_USERNAME} y dale a *Iniciar* — te mandará tu código.\n\n"
+        "✍️ Introduce aquí el código para verificar:",
+        parse_mode="Markdown",
+        reply_markup=kb,
+    )
+    context.user_data["code_msg_id"] = msg.message_id
+
+
 async def recibir_telefono(update: Update, context: ContextTypes.DEFAULT_TYPE):
     telefono = update.message.text.strip().replace(" ", "")
     chat_id = update.effective_chat.id
@@ -332,31 +350,31 @@ async def recibir_telefono(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pass
 
     context.user_data["pending_phone"] = telefono
-    codigo = generar_codigo_verificacion()
-    db.set_pendiente(telegram_id, codigo)
-
-    kb = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("📲 Ir a verificar", url=f"https://t.me/{SMS_BOT_USERNAME}?start=verificar")]]
-    )
-    msg = await context.bot.send_message(
-        chat_id,
-        f"Pulsa el botón para hablar con @{SMS_BOT_USERNAME}, dale a *Iniciar* y te mandará tu código de "
-        "verificación. Luego vuelve aquí y escríbelo.",
-        parse_mode="Markdown",
-        reply_markup=kb,
-    )
-    context.user_data["code_msg_id"] = msg.message_id
+    await enviar_solicitud_codigo(chat_id, context, telegram_id)
     return CONFIRM_PHONE
 
 
 async def confirmar_codigo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     codigo_escrito = update.message.text.strip().upper()
     telegram_id = update.effective_user.id
-    codigo_esperado = db.get_pendiente_codigo(telegram_id)
+    pendiente = db.get_pendiente(telegram_id)
     chat_id = update.effective_chat.id
 
-    if not codigo_esperado or codigo_escrito != codigo_esperado:
-        await update.message.reply_text("❌ Código incorrecto. Vuelve a escribirlo:")
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
+
+    if not pendiente or codigo_escrito != pendiente["codigo"]:
+        # Código incorrecto o caducado: se invalida y se genera uno nuevo automáticamente.
+        code_msg_id = context.user_data.get("code_msg_id")
+        if code_msg_id:
+            try:
+                await context.bot.delete_message(chat_id, code_msg_id)
+            except Exception:
+                pass
+        await context.bot.send_message(chat_id, "❌ Código incorrecto. Te hemos generado uno nuevo:")
+        await enviar_solicitud_codigo(chat_id, context, telegram_id)
         return CONFIRM_PHONE
 
     purpose = context.user_data.get("auth_purpose", "signup")
@@ -371,9 +389,10 @@ async def confirmar_codigo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             es_admin_flag = bool(usuario["is_admin"])
         else:
             db.borrar_pendiente(telegram_id)
-            await update.message.reply_text(
+            await context.bot.send_message(
+                chat_id,
                 "❌ Ese número no coincide con el registrado para esa cuenta. "
-                f"Contacta con el admin (☎️ {CONTACTO_TELEFONO}) si necesitas ayuda."
+                f"Contacta con el admin (☎️ {CONTACTO_TELEFONO}) si necesitas ayuda.",
             )
             return ConversationHandler.END
     else:
@@ -381,19 +400,23 @@ async def confirmar_codigo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         mensaje_ok = f"✅ Usuario *{username}* creado."
         es_admin_flag = False
 
+    mensaje_id_sms = pendiente.get("mensaje_id_sms") if pendiente else None
     db.borrar_pendiente(telegram_id)
 
-    # Limpieza: se borra el mensaje con el botón de verificar y el que escribió el usuario.
+    # Limpieza: se borra el mensaje con el botón de verificar (bot principal)...
     code_msg_id = context.user_data.get("code_msg_id")
     if code_msg_id:
         try:
             await context.bot.delete_message(chat_id, code_msg_id)
         except Exception:
             pass
-    try:
-        await update.message.delete()
-    except Exception:
-        pass
+
+    # ...y el mensaje con el código que mandó el bot temporal (@SMSTienda_bot).
+    if mensaje_id_sms and SMS_BOT_APP:
+        try:
+            await SMS_BOT_APP.bot.delete_message(telegram_id, mensaje_id_sms)
+        except Exception:
+            pass
 
     await enviar_menu(chat_id, context, es_admin_flag, mensaje_ok)
     return ConversationHandler.END
@@ -795,23 +818,36 @@ def sembrar_catalogo_inicial():
 # ---------------------------------------------------------------------
 
 # ---------------------------------------------------------------------
-# Segundo bot: sms_tienda_bot (solo entrega el código de verificación)
+# Segundo bot: SMSTienda_bot (solo entrega el código de verificación,
+# no acepta ninguna otra interacción del usuario)
 # ---------------------------------------------------------------------
+
+SMS_BOT_APP = None  # se asigna en main_async(); el bot principal lo usa para borrar mensajes
+
 
 async def sms_bot_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     telegram_id = update.effective_user.id
     codigo = db.get_pendiente_codigo(telegram_id)
     if codigo:
-        await update.message.reply_text(
+        msg = await update.message.reply_text(
             f"📲 Tu código de verificación para *Tienda de Pulseras* es:\n\n*{codigo}*\n\n"
             "Vuelve al chat de la tienda y escríbelo allí.",
             parse_mode="Markdown",
         )
+        db.set_mensaje_sms(telegram_id, msg.message_id)
     else:
         await update.message.reply_text(
             "No tienes ningún código pendiente ahora mismo. Pide uno nuevo escribiendo /start "
             "en el bot de la tienda."
         )
+
+
+async def sms_bot_ignorar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Este bot solo entrega códigos: no acepta escribir ni mandar nada más."""
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------
@@ -871,10 +907,14 @@ def construir_bot_tienda() -> Application:
 def construir_bot_sms() -> Application:
     app = Application.builder().token(SMS_BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", sms_bot_start))
+    # Cualquier otra cosa que escriban o manden (texto, fotos, archivos...) se ignora/borra.
+    app.add_handler(MessageHandler(~filters.COMMAND, sms_bot_ignorar))
     return app
 
 
 async def main_async():
+    global SMS_BOT_APP
+
     db.init_db()
     sembrar_catalogo_inicial()
 
@@ -889,6 +929,7 @@ async def main_async():
         await app_sms.initialize()
         await app_sms.start()
         await app_sms.updater.start_polling()
+        SMS_BOT_APP = app_sms
         logger.info("Bot de verificación (%s) iniciado...", SMS_BOT_USERNAME)
     else:
         logger.warning("SMS_BOT_TOKEN no configurado: el segundo bot no se ha iniciado.")
