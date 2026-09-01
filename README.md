@@ -12,7 +12,7 @@ pip install python-telegram-bot pillow --break-system-packages
 
 Este proyecto usa **dos bots**:
 - El bot principal de la tienda (el que ya tienes).
-- Un segundo bot, **solo para entregar el código de verificación** (ej. `sms_tienda_bot`). No hace nada más.
+- Un segundo bot, **solo para entregar el código de verificación** (ej. `SMSTienda_bot`). No hace nada más.
 
 Para cada uno:
 1. Habla con **@BotFather** → `/newbot` → sigue los pasos → te da un **token**.
@@ -28,7 +28,7 @@ export PROVIDER_TOKEN="tu_provider_token_de_pagos"
 export ADMIN_USERNAME="cristiancocinero15"
 export ADMIN_PASSWORD="la_contraseña_que_tú_elijas"
 export SMS_BOT_TOKEN="token_del_segundo_bot"
-export SMS_BOT_USERNAME="sms_tienda_bot"   # el @usuario del segundo bot, sin la @
+export SMS_BOT_USERNAME="SMSTienda_bot"   # el @usuario del segundo bot, sin la @
 ```
 
 🔒 **Nunca subas `ADMIN_PASSWORD` al código ni a GitHub.** Solo se pone como variable de entorno (en Railway: pestaña "Variables").
@@ -51,7 +51,7 @@ Arranca los dos bots a la vez. Al arrancar por primera vez se crea `tienda.db` y
 ### Crear cuenta / Iniciar sesión
 1. Nombre de usuario (si es `ADMIN_USERNAME` → pide contraseña; si ya está cogido → sugiere una variante).
 2. Escribes tu teléfono a mano, con prefijo de país (ej. `+34612345678`).
-3. El bot te da un botón para hablar con el segundo bot (`@sms_tienda_bot`). Le das a *Iniciar* ahí y te manda un **código de 6 caracteres (3 letras mayúsculas + 3 números, aleatorio)**.
+3. El bot te da un botón para hablar con el segundo bot (`@SMSTienda_bot`). Le das a *Iniciar* ahí y te manda un **código de 6 caracteres (3 letras mayúsculas + 3 números, aleatorio)**.
 4. Vuelves al chat de la tienda y escribes el código.
 5. Se borra el mensaje con el botón y el que escribiste tú, y aparece el menú.
 
