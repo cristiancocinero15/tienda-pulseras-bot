@@ -37,7 +37,11 @@ def init_db():
         """CREATE TABLE IF NOT EXISTS pendientes_verificacion (
             telegram_id INTEGER PRIMARY KEY,
             codigo TEXT NOT NULL,
+            purpose TEXT,
+            username TEXT,
+            telefono TEXT,
             mensaje_id_sms INTEGER,
+            mensaje_id_tienda INTEGER,
             creado_en TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )"""
     )
@@ -127,14 +131,20 @@ def update_telegram_id(username: str, new_telegram_id: int):
 
 # --- Verificación (compartida entre el bot principal y el bot de SMS) ---
 
-def set_pendiente(telegram_id: int, codigo: str):
-    """Crea/reemplaza el código pendiente. Invalida cualquier mensaje anterior del bot de SMS."""
+def set_pendiente(telegram_id: int, codigo: str, purpose: str = None, username: str = None, telefono: str = None):
+    """Crea/reemplaza el código pendiente. Invalida cualquier mensaje anterior de los dos bots.
+    Si purpose/username/telefono se omiten (ej. al regenerar el código), se conservan los que ya había."""
     conn = get_conn()
     conn.execute(
-        "INSERT INTO pendientes_verificacion (telegram_id, codigo, mensaje_id_sms) VALUES (?, ?, NULL) "
-        "ON CONFLICT(telegram_id) DO UPDATE SET codigo = excluded.codigo, mensaje_id_sms = NULL, "
-        "creado_en = CURRENT_TIMESTAMP",
-        (telegram_id, codigo),
+        "INSERT INTO pendientes_verificacion (telegram_id, codigo, purpose, username, telefono) "
+        "VALUES (?, ?, ?, ?, ?) "
+        "ON CONFLICT(telegram_id) DO UPDATE SET "
+        "codigo = excluded.codigo, "
+        "purpose = COALESCE(excluded.purpose, pendientes_verificacion.purpose), "
+        "username = COALESCE(excluded.username, pendientes_verificacion.username), "
+        "telefono = COALESCE(excluded.telefono, pendientes_verificacion.telefono), "
+        "mensaje_id_sms = NULL, mensaje_id_tienda = NULL, creado_en = CURRENT_TIMESTAMP",
+        (telegram_id, codigo, purpose, username, telefono),
     )
     conn.commit()
     conn.close()
@@ -144,6 +154,16 @@ def set_mensaje_sms(telegram_id: int, mensaje_id: int):
     conn = get_conn()
     conn.execute(
         "UPDATE pendientes_verificacion SET mensaje_id_sms = ? WHERE telegram_id = ?",
+        (mensaje_id, telegram_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def set_mensaje_tienda(telegram_id: int, mensaje_id: int):
+    conn = get_conn()
+    conn.execute(
+        "UPDATE pendientes_verificacion SET mensaje_id_tienda = ? WHERE telegram_id = ?",
         (mensaje_id, telegram_id),
     )
     conn.commit()
