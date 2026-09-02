@@ -86,7 +86,15 @@ Disponible para cliente y admin en el menú.
 3. Variables: `BOT_TOKEN`, `PROVIDER_TOKEN`, `ADMIN_USERNAME`, `ADMIN_PASSWORD`, `GMAIL_ADDRESS`, `GMAIL_APP_PASSWORD`.
 4. Un solo servicio, un solo bot — ya no hace falta ningún bot segundo ni servicio extra.
 
-⚠️ El sistema de archivos de Railway no es persistente entre redeploys: `tienda.db` y las fotos que suba el admin se perderán si vuelves a desplegar, salvo que añadas un **Volume** (Settings → Volumes).
+⚠️ El sistema de archivos de Railway no es persistente entre redeploys: `tienda.db` (usuarios, emails, productos) y las fotos que suba el admin se perderán si vuelves a desplegar, salvo que añadas un **Volume**:
+
+1. Ve a la **vista principal del proyecto** en Railway (el lienzo con las cajas, no la pestaña Settings).
+2. Clic derecho en un hueco vacío del lienzo (o `Cmd+K` / `Ctrl+K`) → **"Create Volume"**.
+3. Conéctalo a tu servicio `tienda-pulseras-bot`.
+4. **Mount path**: `/app/data`
+5. Guarda y espera al redeploy.
+
+No hace falta ninguna variable extra — el bot detecta el Volume automáticamente (usa la variable `RAILWAY_VOLUME_MOUNT_PATH` que Railway inyecta sola). A partir de ahí, usuarios, emails y fotos sobreviven a los redeploys.
 
 ## Personalizar
 

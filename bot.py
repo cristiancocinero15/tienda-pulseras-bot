@@ -79,8 +79,14 @@ GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "")
 
 TIENDA_BOT_USERNAME = None  # se rellena en main_async() con bot.get_me()
 
-IMG_DIR = os.path.join(os.path.dirname(__file__), "imagenes")
-os.makedirs(IMG_DIR, exist_ok=True)
+SEED_IMG_DIR = os.path.join(os.path.dirname(__file__), "imagenes")  # pulseras de ejemplo (repo)
+
+# Fotos que suba el admin: si hay un Volume conectado en Railway (variable
+# RAILWAY_VOLUME_MOUNT_PATH, automática), se guardan ahí para sobrevivir a los
+# redeploys. Si no, se puede forzar con DATA_DIR a mano.
+_DATA_DIR = os.environ.get("DATA_DIR") or os.environ.get("RAILWAY_VOLUME_MOUNT_PATH") or os.path.dirname(__file__)
+UPLOAD_IMG_DIR = os.path.join(_DATA_DIR, "uploads")
+os.makedirs(UPLOAD_IMG_DIR, exist_ok=True)
 
 VINAROS_LAT = 40.4676
 VINAROS_LON = 0.4753
@@ -711,14 +717,34 @@ async def admin_ver_usuarios(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await query.answer()
 
     usuarios = db.get_all_users()
-    lineas = ["👥 *Usuarios registrados:*\n"]
-    for u in usuarios:
-        etiqueta = " (admin)" if u["is_admin"] else ""
-        estado = "" if u["activa"] else " · sesión cerrada"
-        lineas.append(f"• {u['username']}{etiqueta}{estado}")
-
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Menú", callback_data="volver_menu")]])
-    await query.edit_message_text("\n".join(lineas), parse_mode="Markdown", reply_markup=kb)
+
+    if not usuarios:
+        await query.edit_message_text("👥 Todavía no hay usuarios registrados.", reply_markup=kb)
+        return
+
+    activos = [u for u in usuarios if u["activa"]]
+    inactivos = [u for u in usuarios if not u["activa"]]
+
+    lineas = [f"👥 Usuarios registrados: {len(usuarios)}\n"]
+
+    lineas.append(f"🟢 Con sesión abierta ({len(activos)})")
+    if activos:
+        for u in activos:
+            etiqueta = " · admin" if u["is_admin"] else ""
+            lineas.append(f"• {u['username']}{etiqueta}")
+    else:
+        lineas.append("(ninguno)")
+
+    lineas.append(f"\n⚪ Sesión cerrada ({len(inactivos)})")
+    if inactivos:
+        for u in inactivos:
+            etiqueta = " · admin" if u["is_admin"] else ""
+            lineas.append(f"• {u['username']}{etiqueta}")
+    else:
+        lineas.append("(ninguno)")
+
+    await query.edit_message_text("\n".join(lineas), reply_markup=kb)
 
 
 async def admin_add_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -812,7 +838,7 @@ async def admin_add_foto(update: Update, context: ContextTypes.DEFAULT_TYPE):
     precio = context.user_data["nuevo_producto_precio"]
 
     nombre_archivo = f"{nombre.lower().replace(' ', '_')}_{foto.file_unique_id}.jpg"
-    ruta = os.path.join(IMG_DIR, nombre_archivo)
+    ruta = os.path.join(UPLOAD_IMG_DIR, nombre_archivo)
     with open(ruta, "wb") as f:
         f.write(datos_cuadrados)
 
@@ -861,7 +887,7 @@ def sembrar_catalogo_inicial():
     if db.contar_productos() > 0:
         return
     for nombre, categoria, precio, archivo in SEED_PRODUCTOS:
-        ruta = os.path.join(IMG_DIR, archivo)
+        ruta = os.path.join(SEED_IMG_DIR, archivo)
         if os.path.exists(ruta):
             db.add_product(nombre, precio, ruta, categoria)
 

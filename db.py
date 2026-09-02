@@ -5,7 +5,12 @@ verificación por email (código pendiente).
 import sqlite3
 import os
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "tienda.db")
+# Si hay un Volume conectado en Railway, usa esa ruta automáticamente (variable
+# que Railway inyecta sola: RAILWAY_VOLUME_MOUNT_PATH). Si no, se puede forzar
+# con DATA_DIR a mano, o si no hay ninguna, se usa la carpeta del proyecto.
+_DATA_DIR = os.environ.get("DATA_DIR") or os.environ.get("RAILWAY_VOLUME_MOUNT_PATH") or os.path.dirname(__file__)
+os.makedirs(_DATA_DIR, exist_ok=True)
+DB_PATH = os.path.join(_DATA_DIR, "tienda.db")
 
 
 def get_conn():
