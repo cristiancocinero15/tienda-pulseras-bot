@@ -403,10 +403,12 @@ async def enviar_solicitud_codigo(chat_id, context, telegram_id, purpose=None, u
 
     pendiente = db.get_pendiente(telegram_id)
     destinatario = email or pendiente.get("email")
+    nombre_usuario = username or pendiente.get("username") or "usuario/a"
 
     enlace = f"https://t.me/{TIENDA_BOT_USERNAME}?start=verify_{codigo}" if TIENDA_BOT_USERNAME else None
     boton_html = f"<p><a href='{enlace}'>✅ Confirmar directamente</a></p>" if enlace else ""
     cuerpo_html = (
+        f"<p>Hola {nombre_usuario} ({destinatario}),</p>"
         f"<p>Tu código de verificación para <b>Tienda de Pulseras</b> es:</p>"
         f"<h2>{codigo}</h2>"
         f"<p>Escríbelo en el chat de Telegram, o usa el botón para confirmar en un toque:</p>"
@@ -498,7 +500,9 @@ async def cerrar_sesion(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer("Sesión cerrada")
     db.set_activa(update.effective_user.id, False)
+    mensaje_id = query.message.message_id  # el mismo mensaje se convierte en el aviso de "sesión cerrada"
     context.user_data.clear()
+    context.user_data["last_menu_msg_id"] = mensaje_id
     await query.edit_message_text("🚪 Sesión cerrada. Escribe /start cuando quieras volver a entrar.")
 
 
