@@ -410,18 +410,24 @@ async def enviar_solicitud_codigo(chat_id, context, telegram_id, purpose=None, u
 
     if enviado:
         texto = (
-            f"📧 Te hemos enviado un código a *{destinatario}*.\n\n"
+            f"📧 Te hemos enviado un código a {destinatario}.\n\n"
             "Escríbelo aquí para verificar, o pulsa el botón \"Confirmar\" del correo para hacerlo "
             "en un toque."
         )
     else:
         # Gmail no configurado o falló el envío: mostramos el código aquí para no bloquear las pruebas.
         texto = (
-            f"⚠️ No se pudo enviar el email (revisa GMAIL_ADDRESS/GMAIL_APP_PASSWORD).\n\n"
-            f"Tu código es: *{codigo}*\n\nEscríbelo aquí para verificar:"
+            "⚠️ No se pudo enviar el email (revisa las variables de Gmail en Railway).\n\n"
+            f"Tu código es: {codigo}\n\nEscríbelo aquí para verificar:"
         )
 
-    msg = await context.bot.send_message(chat_id, texto, parse_mode="Markdown")
+    try:
+        msg = await context.bot.send_message(chat_id, texto)
+    except Exception as e:
+        logger.error("Error enviando el mensaje de código: %s", e)
+        msg = await context.bot.send_message(
+            chat_id, f"Tu código es: {codigo}\n\nEscríbelo aquí para verificar:"
+        )
     context.user_data["code_msg_id"] = msg.message_id
     db.set_mensaje(telegram_id, msg.message_id)
 
@@ -864,6 +870,10 @@ def sembrar_catalogo_inicial():
 # Main
 # ---------------------------------------------------------------------
 
+async def manejador_errores(update: object, context: ContextTypes.DEFAULT_TYPE):
+    logger.error("Excepción no controlada: %s", context.error, exc_info=context.error)
+
+
 def construir_bot_tienda() -> Application:
     app = Application.builder().token(BOT_TOKEN).build()
 
@@ -911,6 +921,7 @@ def construir_bot_tienda() -> Application:
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, pago_exitoso))
     # Los clientes solo pueden usar texto/botones: se avisa si mandan fotos o archivos.
     app.add_handler(MessageHandler(filters.PHOTO | filters.Document.ALL | filters.VIDEO | filters.AUDIO, contenido_no_permitido))
+    app.add_error_handler(manejador_errores)
     return app
 
 
