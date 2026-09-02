@@ -169,6 +169,14 @@ def cart_total(cart: dict) -> float:
     return total
 
 
+async def borrar_mensaje_usuario(update: Update):
+    if update.message:
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
+
+
 def menu_principal_kb(es_admin: bool) -> InlineKeyboardMarkup:
     filas = [
         [InlineKeyboardButton("🎨 Ver catálogo", callback_data="ver_catalogo")],
@@ -446,13 +454,11 @@ async def recibir_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
     telegram_id = update.effective_user.id
 
     if not EMAIL_REGEX.match(email):
+        await borrar_mensaje_usuario(update)
         await update.message.reply_text("Formato no válido. Escribe un email real, ej: nombre@gmail.com")
         return ASK_EMAIL
 
-    try:
-        await update.message.delete()
-    except Exception:
-        pass
+    await borrar_mensaje_usuario(update)
 
     context.user_data["pending_email"] = email
     purpose = context.user_data.get("auth_purpose", "signup")
@@ -488,6 +494,7 @@ async def confirmar_codigo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cancelar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await borrar_mensaje_usuario(update)
     await update.message.reply_text("Operación cancelada.", reply_markup=ReplyKeyboardRemove())
     return ConversationHandler.END
 
@@ -654,6 +661,8 @@ async def recibir_ubicacion(update: Update, context: ContextTypes.DEFAULT_TYPE):
     loc = update.message.location
     dist = distancia_km(loc.latitude, loc.longitude, VINAROS_LAT, VINAROS_LON)
 
+    await borrar_mensaje_usuario(update)
+
     if dist > RADIO_MAXIMO_KM:
         await update.message.reply_text(
             "❌ Lo sentimos, no podemos entregar en tu ubicación. Solo repartimos "
@@ -814,6 +823,7 @@ async def admin_add_precio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         precio = float(update.message.text.replace(",", "."))
     except ValueError:
+        await borrar_mensaje_usuario(update)
         await update.message.reply_text("Precio no válido, escribe solo un número, ej. 3.50:")
         return ADMIN_PRECIO
     context.user_data["nuevo_producto_precio"] = precio
@@ -858,6 +868,7 @@ async def admin_add_foto(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # --- Los clientes solo pueden usar chat de texto: nada de fotos/archivos ---
 
 async def contenido_no_permitido(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await borrar_mensaje_usuario(update)
     if await es_admin(update):
         await update.message.reply_text(
             "Para añadir un producto usa el botón '➕ Añadir producto' del menú."
@@ -867,6 +878,10 @@ async def contenido_no_permitido(update: Update, context: ContextTypes.DEFAULT_T
             "Solo puedo atender pedidos por chat de texto o los botones del menú. "
             "No se aceptan fotos ni archivos aquí."
         )
+
+
+async def borrar_texto_no_manejado(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await borrar_mensaje_usuario(update)
 
 
 # ---------------------------------------------------------------------
@@ -917,7 +932,11 @@ def construir_bot_tienda() -> Application:
             ASK_EMAIL: [MessageHandler(filters.TEXT & ~filters.COMMAND, recibir_email)],
             CONFIRM_EMAIL: [MessageHandler(filters.TEXT & ~filters.COMMAND, confirmar_codigo)],
         },
-        fallbacks=[CommandHandler("cancelar", cancelar), CommandHandler("start", start)],
+        fallbacks=[
+            CommandHandler("cancelar", cancelar),
+            CommandHandler("start", start),
+            MessageHandler(filters.TEXT & ~filters.COMMAND, borrar_texto_no_manejado),
+        ],
     )
 
     admin_add_conv = ConversationHandler(
@@ -931,7 +950,10 @@ def construir_bot_tienda() -> Application:
             ADMIN_PRECIO: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_add_precio)],
             ADMIN_FOTO: [MessageHandler(filters.PHOTO, admin_add_foto)],
         },
-        fallbacks=[CommandHandler("cancelar", cancelar)],
+        fallbacks=[
+            CommandHandler("cancelar", cancelar),
+            MessageHandler(filters.TEXT & ~filters.COMMAND, borrar_texto_no_manejado),
+        ],
     )
 
     app.add_handler(login_conv)
@@ -951,6 +973,7 @@ def construir_bot_tienda() -> Application:
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, pago_exitoso))
     # Los clientes solo pueden usar texto/botones: se avisa si mandan fotos o archivos.
     app.add_handler(MessageHandler(filters.PHOTO | filters.Document.ALL | filters.VIDEO | filters.AUDIO, contenido_no_permitido))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, borrar_texto_no_manejado))
     app.add_error_handler(manejador_errores)
     return app
 
