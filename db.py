@@ -1,5 +1,6 @@
 """
-Base de datos SQLite: usuarios (con roles) y productos del catálogo.
+Base de datos SQLite: usuarios (con roles), productos del catálogo y
+verificación por email (código pendiente).
 """
 import sqlite3
 import os
@@ -19,11 +20,17 @@ def init_db():
         """CREATE TABLE IF NOT EXISTS usuarios (
             telegram_id INTEGER PRIMARY KEY,
             username TEXT UNIQUE NOT NULL,
-            phone_number TEXT,
+            email TEXT,
             is_admin INTEGER NOT NULL DEFAULT 0,
             activa INTEGER NOT NULL DEFAULT 1
         )"""
     )
+    # Migración suave por si la base ya existía sin la columna 'email'.
+    try:
+        conn.execute("ALTER TABLE usuarios ADD COLUMN email TEXT")
+    except sqlite3.OperationalError:
+        pass  # ya existía
+
     conn.execute(
         """CREATE TABLE IF NOT EXISTS productos (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -39,9 +46,8 @@ def init_db():
             codigo TEXT NOT NULL,
             purpose TEXT,
             username TEXT,
-            telefono TEXT,
-            mensaje_id_sms INTEGER,
-            mensaje_id_tienda INTEGER,
+            email TEXT,
+            mensaje_id INTEGER,
             creado_en TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )"""
     )
@@ -71,7 +77,7 @@ def set_activa(telegram_id: int, activa: bool):
 
 
 def get_all_users():
-    """Lista de usuarios SIN el número de teléfono (privacidad)."""
+    """Lista de usuarios SIN el email (privacidad, ni siquiera para el admin)."""
     conn = get_conn()
     rows = conn.execute(
         "SELECT username, is_admin, activa FROM usuarios ORDER BY username"
@@ -99,11 +105,11 @@ def sugerir_username_libre(username: str) -> str:
     return candidato
 
 
-def create_user(telegram_id: int, username: str, phone_number: str = None, is_admin: bool = False):
+def create_user(telegram_id: int, username: str, email: str = None, is_admin: bool = False):
     conn = get_conn()
     conn.execute(
-        "INSERT INTO usuarios (telegram_id, username, phone_number, is_admin) VALUES (?, ?, ?, ?)",
-        (telegram_id, username, phone_number, int(is_admin)),
+        "INSERT INTO usuarios (telegram_id, username, email, is_admin) VALUES (?, ?, ?, ?)",
+        (telegram_id, username, email, int(is_admin)),
     )
     conn.commit()
     conn.close()
@@ -129,41 +135,31 @@ def update_telegram_id(username: str, new_telegram_id: int):
     conn.close()
 
 
-# --- Verificación (compartida entre el bot principal y el bot de SMS) ---
+# --- Verificación por email ---
 
-def set_pendiente(telegram_id: int, codigo: str, purpose: str = None, username: str = None, telefono: str = None):
-    """Crea/reemplaza el código pendiente. Invalida cualquier mensaje anterior de los dos bots.
-    Si purpose/username/telefono se omiten (ej. al regenerar el código), se conservan los que ya había."""
+def set_pendiente(telegram_id: int, codigo: str, purpose: str = None, username: str = None, email: str = None):
+    """Crea/reemplaza el código pendiente. Si purpose/username/email se omiten
+    (ej. al regenerar el código), se conservan los que ya había."""
     conn = get_conn()
     conn.execute(
-        "INSERT INTO pendientes_verificacion (telegram_id, codigo, purpose, username, telefono) "
+        "INSERT INTO pendientes_verificacion (telegram_id, codigo, purpose, username, email) "
         "VALUES (?, ?, ?, ?, ?) "
         "ON CONFLICT(telegram_id) DO UPDATE SET "
         "codigo = excluded.codigo, "
         "purpose = COALESCE(excluded.purpose, pendientes_verificacion.purpose), "
         "username = COALESCE(excluded.username, pendientes_verificacion.username), "
-        "telefono = COALESCE(excluded.telefono, pendientes_verificacion.telefono), "
-        "mensaje_id_sms = NULL, mensaje_id_tienda = NULL, creado_en = CURRENT_TIMESTAMP",
-        (telegram_id, codigo, purpose, username, telefono),
+        "email = COALESCE(excluded.email, pendientes_verificacion.email), "
+        "mensaje_id = NULL, creado_en = CURRENT_TIMESTAMP",
+        (telegram_id, codigo, purpose, username, email),
     )
     conn.commit()
     conn.close()
 
 
-def set_mensaje_sms(telegram_id: int, mensaje_id: int):
+def set_mensaje(telegram_id: int, mensaje_id: int):
     conn = get_conn()
     conn.execute(
-        "UPDATE pendientes_verificacion SET mensaje_id_sms = ? WHERE telegram_id = ?",
-        (mensaje_id, telegram_id),
-    )
-    conn.commit()
-    conn.close()
-
-
-def set_mensaje_tienda(telegram_id: int, mensaje_id: int):
-    conn = get_conn()
-    conn.execute(
-        "UPDATE pendientes_verificacion SET mensaje_id_tienda = ? WHERE telegram_id = ?",
+        "UPDATE pendientes_verificacion SET mensaje_id = ? WHERE telegram_id = ?",
         (mensaje_id, telegram_id),
     )
     conn.commit()
@@ -177,11 +173,6 @@ def get_pendiente(telegram_id: int):
     ).fetchone()
     conn.close()
     return dict(row) if row else None
-
-
-def get_pendiente_codigo(telegram_id: int):
-    pendiente = get_pendiente(telegram_id)
-    return pendiente["codigo"] if pendiente else None
 
 
 def borrar_pendiente(telegram_id: int):

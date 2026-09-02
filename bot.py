@@ -1,28 +1,32 @@
 """
 Bot de Telegram - Tienda de Pulseras
 ---------------------------------------------------------------------------
-- /start: se borra el mensaje anterior del bot y el propio /start para que
-  el chat quede limpio. Si la sesión está activa, entra directo al menú.
-  Si no, ofrece "🆕 Crear cuenta" o "🔑 Iniciar sesión".
+- /start: se borra el mensaje anterior del bot y el propio /start. Si la
+  sesión está activa, entra directo al menú. Si no, ofrece "🆕 Crear cuenta"
+  o "🔑 Iniciar sesión".
 - Registro: nombre de usuario -> (admin: contraseña / normal: escribir el
-  teléfono con prefijo de país, ej. +34612345678) -> el bot envía un código
-  de verificación (3 letras mayúsculas + 3 números, aleatorio) que hay que
-  escribir para confirmar -> se borra el código y se muestra el menú.
-- 🚪 Cerrar sesión: disponible para cliente y admin. Al cerrar sesión hay
-  que volver a iniciar sesión (usuario + teléfono, o contraseña si es admin).
-- Admin: puede ver la lista de usuarios (SIN el teléfono) y añadir productos
-  (nombre, precio, foto - se recorta automáticamente a cuadrado 1:1).
+  email) -> el bot manda un email con un código de 6 dígitos Y un enlace de
+  confirmación directo. Puedes verificar de dos formas:
+    a) Escribir el código de 6 dígitos en el chat.
+    b) Pulsar el botón "Confirmar" del email (te lleva directo al menú).
+  Si el código es incorrecto, se invalida y se genera + reenvía uno nuevo
+  automáticamente.
+- 🚪 Cerrar sesión: disponible para cliente y admin.
+- Admin: añade productos (nombre, categoría, precio, foto recortada a 1:1)
+  y puede ver la lista de usuarios (sin el email de nadie).
 - Los clientes solo pueden usar el chat de texto / los botones: no se
   aceptan fotos ni archivos de su parte.
 - Ubicación: validación silenciosa contra el radio de Vinaròs (1 km).
-- Nota: Telegram no permite a un bot impedir que un usuario borre su propio
-  chat; eso lo controla el cliente de Telegram de cada persona, no el bot.
 
 Variables de entorno necesarias:
-    BOT_TOKEN        -> token de @BotFather
-    PROVIDER_TOKEN    -> token de pagos (Stripe u otra pasarela)
-    ADMIN_USERNAME    -> nombre de usuario del admin (ej. cristiancocinero15)
-    ADMIN_PASSWORD    -> contraseña del admin (NUNCA la subas al código/GitHub)
+    BOT_TOKEN          -> token de @BotFather
+    PROVIDER_TOKEN       -> token de pagos (Stripe, Smart Glocal...)
+    ADMIN_USERNAME       -> nombre de usuario del admin (ej. cristiancocinero15)
+    ADMIN_PASSWORD       -> contraseña del admin (NUNCA la subas al código/GitHub)
+    GMAIL_ADDRESS        -> cuenta de Gmail desde la que se mandan los códigos
+    GMAIL_APP_PASSWORD   -> "contraseña de aplicación" de esa cuenta de Gmail
+                            (Cuenta de Google -> Seguridad -> Verificación en
+                            dos pasos -> Contraseñas de aplicaciones)
 """
 
 import asyncio
@@ -32,7 +36,9 @@ import math
 import os
 import random
 import re
+import smtplib
 import string
+from email.mime.text import MIMEText
 
 from PIL import Image
 from telegram import (
@@ -68,9 +74,10 @@ ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "cristiancocinero15")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 CONTACTO_TELEFONO = "+34 614378910"
 
-# Segundo bot (solo para mandar el código de verificación)
-SMS_BOT_TOKEN = os.environ.get("SMS_BOT_TOKEN", "")
-SMS_BOT_USERNAME = os.environ.get("SMS_BOT_USERNAME", "SMSTienda_bot")
+GMAIL_ADDRESS = os.environ.get("GMAIL_ADDRESS", "")
+GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "")
+
+TIENDA_BOT_USERNAME = None  # se rellena en main_async() con bot.get_me()
 
 IMG_DIR = os.path.join(os.path.dirname(__file__), "imagenes")
 os.makedirs(IMG_DIR, exist_ok=True)
@@ -79,11 +86,11 @@ VINAROS_LAT = 40.4676
 VINAROS_LON = 0.4753
 RADIO_MAXIMO_KM = 1.0
 
-TELEFONO_REGEX = re.compile(r"^\+\d{8,15}$")
+EMAIL_REGEX = re.compile(r"^[^@\s]+@[^@\s]+\.[a-zA-Z]{2,}$")
 
 # Estados de conversación
 (CHOOSE_ACCION, ASK_USERNAME, ASK_PASSWORD_ADMIN, CONFIRM_ALT_USERNAME,
- ASK_PHONE, CONFIRM_PHONE, ADMIN_NOMBRE, ADMIN_CATEGORIA, ADMIN_PRECIO, ADMIN_FOTO) = range(10)
+ ASK_EMAIL, CONFIRM_EMAIL, ADMIN_NOMBRE, ADMIN_CATEGORIA, ADMIN_PRECIO, ADMIN_FOTO) = range(10)
 
 
 # ---------------------------------------------------------------------
@@ -113,10 +120,32 @@ def recortar_cuadrada(datos: bytes) -> bytes:
 
 
 def generar_codigo_verificacion() -> str:
-    """Código de verificación: 3 letras mayúsculas + 3 números, aleatorio."""
-    letras = "".join(random.choices(string.ascii_uppercase, k=3))
-    numeros = "".join(random.choices(string.digits, k=3))
-    return letras + numeros
+    """Código de verificación: 6 dígitos aleatorios."""
+    return "".join(random.choices(string.digits, k=6))
+
+
+def _enviar_email_sync(destinatario: str, asunto: str, cuerpo_html: str) -> bool:
+    if not (GMAIL_ADDRESS and GMAIL_APP_PASSWORD):
+        logger.warning("Gmail no configurado (GMAIL_ADDRESS/GMAIL_APP_PASSWORD): no se envía el email.")
+        return False
+    try:
+        msg = MIMEText(cuerpo_html, "html", "utf-8")
+        msg["Subject"] = asunto
+        msg["From"] = GMAIL_ADDRESS
+        msg["To"] = destinatario
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+            server.login(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
+            server.sendmail(GMAIL_ADDRESS, [destinatario], msg.as_string())
+        return True
+    except Exception as e:
+        logger.error("Error enviando email a %s: %s", destinatario, e)
+        return False
+
+
+async def enviar_email(destinatario: str, asunto: str, cuerpo_html: str) -> bool:
+    """Envía el email sin bloquear el bot (usa un hilo aparte)."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _enviar_email_sync, destinatario, asunto, cuerpo_html)
 
 
 def get_cart(context: ContextTypes.DEFAULT_TYPE) -> dict:
@@ -148,14 +177,12 @@ def menu_principal_kb(es_admin: bool) -> InlineKeyboardMarkup:
 
 
 async def enviar_menu(chat_id, context, es_admin, saludo=""):
-    """Envía el menú como mensaje NUEVO (se usa cuando no hay un mensaje de callback que editar)."""
     texto = (saludo + "\n\n¿Qué quieres hacer?") if saludo else "¿Qué quieres hacer?"
     msg = await context.bot.send_message(chat_id, texto, reply_markup=menu_principal_kb(es_admin))
     context.user_data["last_menu_msg_id"] = msg.message_id
 
 
 async def editar_a_menu(query, es_admin, saludo=""):
-    """Convierte el mensaje del botón pulsado directamente en el menú (evita mandar mensajes de más)."""
     texto = (saludo + "\n\n¿Qué quieres hacer?") if saludo else "¿Qué quieres hacer?"
     try:
         await query.edit_message_text(texto, reply_markup=menu_principal_kb(es_admin))
@@ -166,6 +193,46 @@ async def editar_a_menu(query, es_admin, saludo=""):
 # ---------------------------------------------------------------------
 # Login / registro (/start)
 # ---------------------------------------------------------------------
+
+async def completar_verificacion(telegram_id: int, pendiente: dict):
+    """Crea la cuenta (signup) o mueve la sesión (login) usando los datos
+    guardados en 'pendiente'. Devuelve (ok, mensaje, es_admin)."""
+    purpose = pendiente.get("purpose") or "signup"
+    username = pendiente.get("username")
+    email = pendiente.get("email")
+
+    if purpose == "login":
+        usuario = db.get_user_by_username(username)
+        if usuario and usuario["email"] == email:
+            db.update_telegram_id(username, telegram_id)
+            return True, "✅ Email verificado. Sesión iniciada.", bool(usuario["is_admin"])
+        return False, (
+            "❌ Ese email no coincide con el registrado para esa cuenta. "
+            f"Contacta con el admin (☎️ {CONTACTO_TELEFONO}) si necesitas ayuda."
+        ), False
+
+    db.create_user(telegram_id, username, email=email, is_admin=False)
+    return True, f"✅ Usuario *{username}* creado.", False
+
+
+async def completar_y_mostrar_menu(chat_id, context, telegram_id, pendiente):
+    ok, mensaje_resultado, es_admin_flag = await completar_verificacion(telegram_id, pendiente)
+
+    mensaje_id = pendiente.get("mensaje_id") or context.user_data.get("code_msg_id")
+    db.borrar_pendiente(telegram_id)
+
+    if mensaje_id:
+        try:
+            await context.bot.delete_message(chat_id, mensaje_id)
+        except Exception:
+            pass
+
+    if not ok:
+        await context.bot.send_message(chat_id, mensaje_resultado)
+        return
+
+    await enviar_menu(chat_id, context, es_admin_flag, mensaje_resultado)
+
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     telegram_id = update.effective_user.id
@@ -183,8 +250,21 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         pass
 
-    usuario = db.get_user(telegram_id)
+    # Atajo: enlace "Confirmar" del email (deep link con /start verify_CODIGO).
+    if context.args and context.args[0].startswith("verify_"):
+        codigo_link = context.args[0].replace("verify_", "").strip()
+        pendiente = db.get_pendiente(telegram_id)
+        if pendiente and pendiente["codigo"] == codigo_link:
+            await completar_y_mostrar_menu(chat_id, context, telegram_id, pendiente)
+            return ConversationHandler.END
+        await context.bot.send_message(
+            chat_id,
+            "❌ Ese enlace ya no es válido (puede que hayas pedido un código nuevo). "
+            "Introduce el código a mano, o escribe /start para empezar de nuevo.",
+        )
+        return ConversationHandler.END
 
+    usuario = db.get_user(telegram_id)
     if usuario:
         await enviar_menu(
             chat_id, context, bool(usuario["is_admin"]),
@@ -245,10 +325,8 @@ async def recibir_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "y elige '🆕 Crear cuenta'.",
             )
             return ConversationHandler.END
-        await context.bot.send_message(
-            chat_id, "Escribe tu número de teléfono con el prefijo de país (ej: +34612345678):"
-        )
-        return ASK_PHONE
+        await context.bot.send_message(chat_id, "Escribe tu email:")
+        return ASK_EMAIL
 
     if db.username_exists(username):
         sugerido = db.sugerir_username_libre(username)
@@ -267,10 +345,8 @@ async def recibir_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return CONFIRM_ALT_USERNAME
 
-    await context.bot.send_message(
-        chat_id, "Escribe tu número de teléfono con el prefijo de país (ej: +34612345678):"
-    )
-    return ASK_PHONE
+    await context.bot.send_message(chat_id, "Escribe tu email:")
+    return ASK_EMAIL
 
 
 async def recibir_password_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -291,7 +367,7 @@ async def recibir_password_admin(update: Update, context: ContextTypes.DEFAULT_T
     if existente:
         db.update_telegram_id(ADMIN_USERNAME, telegram_id)
     else:
-        db.create_user(telegram_id, ADMIN_USERNAME, phone_number=None, is_admin=True)
+        db.create_user(telegram_id, ADMIN_USERNAME, email=None, is_admin=True)
 
     await enviar_menu(chat_id, context, True, "✅ Acceso de admin concedido.")
     return ConversationHandler.END
@@ -302,10 +378,8 @@ async def confirmar_username_alternativo(update: Update, context: ContextTypes.D
     await query.answer()
 
     if query.data == "alt_si":
-        await query.edit_message_text(
-            "Escribe tu número de teléfono con el prefijo de país (ej: +34612345678):"
-        )
-        return ASK_PHONE
+        await query.edit_message_text("Escribe tu email:")
+        return ASK_EMAIL
 
     await query.edit_message_text(
         "De acuerdo, no se ha creado el usuario. Contacta con el admin "
@@ -315,81 +389,66 @@ async def confirmar_username_alternativo(update: Update, context: ContextTypes.D
     return ConversationHandler.END
 
 
-async def enviar_solicitud_codigo(chat_id, context, telegram_id, purpose=None, username=None, telefono=None):
-    """Genera un código nuevo, invalida el anterior, y manda el botón + instrucción clara."""
+async def enviar_solicitud_codigo(chat_id, context, telegram_id, purpose=None, username=None, email=None):
+    """Genera un código nuevo, lo manda por email (código + botón de confirmación),
+    e informa en el chat."""
     codigo = generar_codigo_verificacion()
-    db.set_pendiente(telegram_id, codigo, purpose=purpose, username=username, telefono=telefono)
+    db.set_pendiente(telegram_id, codigo, purpose=purpose, username=username, email=email)
 
-    kb = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("📲 Ir a verificar", url=f"https://t.me/{SMS_BOT_USERNAME}?start=verificar")]]
+    pendiente = db.get_pendiente(telegram_id)
+    destinatario = email or pendiente.get("email")
+
+    enlace = f"https://t.me/{TIENDA_BOT_USERNAME}?start=verify_{codigo}" if TIENDA_BOT_USERNAME else None
+    boton_html = f"<p><a href='{enlace}'>✅ Confirmar directamente</a></p>" if enlace else ""
+    cuerpo_html = (
+        f"<p>Tu código de verificación para <b>Tienda de Pulseras</b> es:</p>"
+        f"<h2>{codigo}</h2>"
+        f"<p>Escríbelo en el chat de Telegram, o usa el botón para confirmar en un toque:</p>"
+        f"{boton_html}"
     )
-    msg = await context.bot.send_message(
-        chat_id,
-        f"Pulsa el botón para hablar con @{SMS_BOT_USERNAME} y dale a *Iniciar* — te mandará tu código.\n\n"
-        "✍️ Introduce aquí el código para verificar, o escribe `/sync CÓDIGO` en @"
-        f"{SMS_BOT_USERNAME} para verificarlo allí mismo.",
-        parse_mode="Markdown",
-        reply_markup=kb,
-    )
+    enviado = await enviar_email(destinatario, "Código de verificación - Tienda de Pulseras", cuerpo_html)
+
+    if enviado:
+        texto = (
+            f"📧 Te hemos enviado un código a *{destinatario}*.\n\n"
+            "Escríbelo aquí para verificar, o pulsa el botón \"Confirmar\" del correo para hacerlo "
+            "en un toque."
+        )
+    else:
+        # Gmail no configurado o falló el envío: mostramos el código aquí para no bloquear las pruebas.
+        texto = (
+            f"⚠️ No se pudo enviar el email (revisa GMAIL_ADDRESS/GMAIL_APP_PASSWORD).\n\n"
+            f"Tu código es: *{codigo}*\n\nEscríbelo aquí para verificar:"
+        )
+
+    msg = await context.bot.send_message(chat_id, texto, parse_mode="Markdown")
     context.user_data["code_msg_id"] = msg.message_id
-    db.set_mensaje_tienda(telegram_id, msg.message_id)
+    db.set_mensaje(telegram_id, msg.message_id)
 
 
-async def recibir_telefono(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    telefono = update.message.text.strip().replace(" ", "")
+async def recibir_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    email = update.message.text.strip()
     chat_id = update.effective_chat.id
     telegram_id = update.effective_user.id
 
-    if not TELEFONO_REGEX.match(telefono):
-        await update.message.reply_text(
-            "Formato no válido. Escríbelo con el prefijo de país, ej: +34612345678"
-        )
-        return ASK_PHONE
+    if not EMAIL_REGEX.match(email):
+        await update.message.reply_text("Formato no válido. Escribe un email real, ej: nombre@gmail.com")
+        return ASK_EMAIL
 
     try:
         await update.message.delete()
     except Exception:
         pass
 
-    context.user_data["pending_phone"] = telefono
+    context.user_data["pending_email"] = email
     purpose = context.user_data.get("auth_purpose", "signup")
     username = context.user_data.get("pending_username")
-    await enviar_solicitud_codigo(chat_id, context, telegram_id, purpose, username, telefono)
-    return CONFIRM_PHONE
-
-
-async def completar_verificacion(telegram_id: int, pendiente: dict):
-    """Crea la cuenta (signup) o mueve la sesión (login) usando los datos guardados
-    en 'pendiente'. No depende de ningún bot en concreto, así la usan tanto el bot
-    de la tienda como @SMSTienda_bot (comando /sync).
-    Devuelve (ok, mensaje, es_admin)."""
-    purpose = pendiente.get("purpose") or "signup"
-    username = pendiente.get("username")
-    telefono = pendiente.get("telefono")
-
-    if purpose == "login":
-        usuario = db.get_user_by_username(username)
-        if usuario and usuario["phone_number"] == telefono:
-            db.update_telegram_id(username, telegram_id)
-            return True, "✅ Número verificado. Sesión iniciada.", bool(usuario["is_admin"])
-        return False, (
-            "❌ Ese número no coincide con el registrado para esa cuenta. "
-            f"Contacta con el admin (☎️ {CONTACTO_TELEFONO}) si necesitas ayuda."
-        ), False
-
-    db.create_user(telegram_id, username, phone_number=telefono, is_admin=False)
-    return True, f"✅ Usuario *{username}* creado.", False
-
-
-async def enviar_menu_bot(bot, chat_id, es_admin, saludo=""):
-    """Igual que enviar_menu, pero recibe directamente el objeto 'bot' (para poder
-    llamarse desde el otro bot, @SMSTienda_bot, tras completar /sync)."""
-    texto = (saludo + "\n\n¿Qué quieres hacer?") if saludo else "¿Qué quieres hacer?"
-    return await bot.send_message(chat_id, texto, reply_markup=menu_principal_kb(es_admin))
+    await enviar_solicitud_codigo(chat_id, context, telegram_id, purpose, username, email)
+    return CONFIRM_EMAIL
 
 
 async def confirmar_codigo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    codigo_escrito = update.message.text.strip().upper()
+    codigo_escrito = update.message.text.strip()
     telegram_id = update.effective_user.id
     pendiente = db.get_pendiente(telegram_id)
     chat_id = update.effective_chat.id
@@ -400,42 +459,17 @@ async def confirmar_codigo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pass
 
     if not pendiente or codigo_escrito != pendiente["codigo"]:
-        # Código incorrecto o caducado: se invalida y se genera uno nuevo automáticamente.
         code_msg_id = context.user_data.get("code_msg_id")
         if code_msg_id:
             try:
                 await context.bot.delete_message(chat_id, code_msg_id)
             except Exception:
                 pass
-        await context.bot.send_message(chat_id, "❌ Código incorrecto. Te hemos generado uno nuevo:")
+        await context.bot.send_message(chat_id, "❌ Código incorrecto. Te hemos generado y reenviado uno nuevo.")
         await enviar_solicitud_codigo(chat_id, context, telegram_id)
-        return CONFIRM_PHONE
+        return CONFIRM_EMAIL
 
-    ok, mensaje_resultado, es_admin_flag = await completar_verificacion(telegram_id, pendiente)
-
-    mensaje_id_sms = pendiente.get("mensaje_id_sms")
-    db.borrar_pendiente(telegram_id)
-
-    # Limpieza: se borra el mensaje con el botón de verificar (bot principal)...
-    code_msg_id = context.user_data.get("code_msg_id")
-    if code_msg_id:
-        try:
-            await context.bot.delete_message(chat_id, code_msg_id)
-        except Exception:
-            pass
-
-    # ...y el mensaje con el código que mandó el bot temporal (@SMSTienda_bot).
-    if mensaje_id_sms and SMS_BOT_APP:
-        try:
-            await SMS_BOT_APP.bot.delete_message(telegram_id, mensaje_id_sms)
-        except Exception:
-            pass
-
-    if not ok:
-        await context.bot.send_message(chat_id, mensaje_resultado)
-        return ConversationHandler.END
-
-    await enviar_menu(chat_id, context, es_admin_flag, mensaje_resultado)
+    await completar_y_mostrar_menu(chat_id, context, telegram_id, pendiente)
     return ConversationHandler.END
 
 
@@ -453,9 +487,7 @@ async def cerrar_sesion(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer("Sesión cerrada")
     db.set_activa(update.effective_user.id, False)
     context.user_data.clear()
-    await query.edit_message_text(
-        "🚪 Sesión cerrada. Escribe /start cuando quieras volver a entrar."
-    )
+    await query.edit_message_text("🚪 Sesión cerrada. Escribe /start cuando quieras volver a entrar.")
 
 
 # ---------------------------------------------------------------------
@@ -519,8 +551,6 @@ async def mostrar_productos_de_categoria(query, context, categoria):
         ]
     )
     await context.bot.send_message(chat_id, "Cuando termines, pulsa 🛒 para ver tu carrito.", reply_markup=kb_final)
-
-
 
 
 async def anadir_al_carrito(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -834,166 +864,6 @@ def sembrar_catalogo_inicial():
 # Main
 # ---------------------------------------------------------------------
 
-# ---------------------------------------------------------------------
-# Segundo bot: SMSTienda_bot (solo entrega el código de verificación,
-# no acepta ninguna otra interacción del usuario)
-# ---------------------------------------------------------------------
-
-SMS_BOT_APP = None  # se asigna en main_async(); el bot principal lo usa para borrar mensajes
-TIENDA_BOT_APP = None  # se asigna en main_async(); @SMSTienda_bot lo usa para /sync
-
-
-async def sms_bot_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    telegram_id = update.effective_user.id
-    codigo = db.get_pendiente_codigo(telegram_id)
-    if codigo:
-        msg = await update.message.reply_text(
-            f"📲 Tu código de verificación para *Tienda de Pulseras* es:\n\n*{codigo}*\n\n"
-            "Vuelve al bot de la tienda y escríbelo allí, o verifica aquí mismo con:\n"
-            "• `/auto` (verificación automática, sin escribir nada)\n"
-            f"• `/sync {codigo}`",
-            parse_mode="Markdown",
-        )
-        db.set_mensaje_sms(telegram_id, msg.message_id)
-    else:
-        await update.message.reply_text(
-            "No tienes ningún código pendiente ahora mismo. Pide uno nuevo escribiendo /start "
-            "en el bot de la tienda."
-        )
-
-
-async def sms_bot_restart(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Invalida el código actual y genera uno nuevo."""
-    telegram_id = update.effective_user.id
-    chat_id = update.effective_chat.id
-    pendiente = db.get_pendiente(telegram_id)
-
-    if not pendiente:
-        await update.message.reply_text(
-            "No tienes ninguna verificación pendiente. Pide una nueva con /start en el bot de la tienda."
-        )
-        return
-
-    if pendiente.get("mensaje_id_sms"):
-        try:
-            await context.bot.delete_message(chat_id, pendiente["mensaje_id_sms"])
-        except Exception:
-            pass
-
-    nuevo_codigo = generar_codigo_verificacion()
-    db.set_pendiente(telegram_id, nuevo_codigo)  # conserva purpose/username/teléfono
-
-    msg = await update.message.reply_text(
-        f"📲 Nuevo código: *{nuevo_codigo}*\n\n"
-        f"Escríbelo en el bot de la tienda, o usa aquí:\n`/sync {nuevo_codigo}`",
-        parse_mode="Markdown",
-    )
-    db.set_mensaje_sms(telegram_id, msg.message_id)
-
-
-async def _completar_y_notificar(update: Update, context: ContextTypes.DEFAULT_TYPE, pendiente: dict):
-    """Completa la verificación, borra los mensajes de los dos bots y avisa/muestra el
-    menú en el bot de la tienda. La usan tanto /sync como /auto."""
-    telegram_id = update.effective_user.id
-    chat_id = update.effective_chat.id
-
-    ok, mensaje_resultado, es_admin_flag = await completar_verificacion(telegram_id, pendiente)
-
-    mensaje_id_sms = pendiente.get("mensaje_id_sms")
-    mensaje_id_tienda = pendiente.get("mensaje_id_tienda")
-    db.borrar_pendiente(telegram_id)
-
-    if mensaje_id_sms:
-        try:
-            await context.bot.delete_message(chat_id, mensaje_id_sms)
-        except Exception:
-            pass
-    if mensaje_id_tienda and TIENDA_BOT_APP:
-        try:
-            await TIENDA_BOT_APP.bot.delete_message(telegram_id, mensaje_id_tienda)
-        except Exception:
-            pass
-
-    if not ok:
-        await update.message.reply_text(mensaje_resultado)
-        return
-
-    await update.message.reply_text("✅ ¡Verificado! Vuelve al bot de la tienda.")
-
-    if TIENDA_BOT_APP:
-        menu_msg = await enviar_menu_bot(TIENDA_BOT_APP.bot, telegram_id, es_admin_flag, mensaje_resultado)
-        TIENDA_BOT_APP.user_data[telegram_id]["last_menu_msg_id"] = menu_msg.message_id
-
-
-async def sms_bot_sync(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Verifica el código escrito como '/sync CÓDIGO' y, si es correcto, completa
-    el registro/inicio de sesión sin tener que volver al bot de la tienda a escribirlo."""
-    telegram_id = update.effective_user.id
-
-    if not context.args:
-        await update.message.reply_text("Escríbelo así: /sync CÓDIGO")
-        return
-
-    codigo_escrito = context.args[0].strip().upper()
-    pendiente = db.get_pendiente(telegram_id)
-
-    if not pendiente:
-        await update.message.reply_text(
-            "No tienes ninguna verificación pendiente. Pide una nueva con /start en el bot de la tienda."
-        )
-        return
-
-    if codigo_escrito != pendiente["codigo"]:
-        await update.message.reply_text("❌ Código incorrecto. Usa /restart para pedir uno nuevo.")
-        return
-
-    await _completar_y_notificar(update, context, pendiente)
-
-
-async def sms_bot_auto(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Verifica automáticamente con el código que ya está pendiente, sin tener que escribirlo."""
-    telegram_id = update.effective_user.id
-    pendiente = db.get_pendiente(telegram_id)
-
-    if not pendiente:
-        await update.message.reply_text(
-            "No tienes ninguna verificación pendiente. Pide una nueva con /start en el bot de la tienda."
-        )
-        return
-
-    await _completar_y_notificar(update, context, pendiente)
-
-
-async def sms_bot_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Cancela la verificación pendiente."""
-    telegram_id = update.effective_user.id
-    chat_id = update.effective_chat.id
-    pendiente = db.get_pendiente(telegram_id)
-
-    if pendiente and pendiente.get("mensaje_id_sms"):
-        try:
-            await context.bot.delete_message(chat_id, pendiente["mensaje_id_sms"])
-        except Exception:
-            pass
-
-    db.borrar_pendiente(telegram_id)
-    await update.message.reply_text(
-        "Verificación cancelada. Si la necesitas, pide una nueva con /start en el bot de la tienda."
-    )
-
-
-async def sms_bot_ignorar(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Este bot solo entrega códigos: no acepta escribir ni mandar nada más."""
-    try:
-        await update.message.delete()
-    except Exception:
-        pass
-
-
-# ---------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------
-
 def construir_bot_tienda() -> Application:
     app = Application.builder().token(BOT_TOKEN).build()
 
@@ -1004,10 +874,10 @@ def construir_bot_tienda() -> Application:
             ASK_USERNAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, recibir_username)],
             ASK_PASSWORD_ADMIN: [MessageHandler(filters.TEXT & ~filters.COMMAND, recibir_password_admin)],
             CONFIRM_ALT_USERNAME: [CallbackQueryHandler(confirmar_username_alternativo, pattern="^alt_")],
-            ASK_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, recibir_telefono)],
-            CONFIRM_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, confirmar_codigo)],
+            ASK_EMAIL: [MessageHandler(filters.TEXT & ~filters.COMMAND, recibir_email)],
+            CONFIRM_EMAIL: [MessageHandler(filters.TEXT & ~filters.COMMAND, confirmar_codigo)],
         },
-        fallbacks=[CommandHandler("cancelar", cancelar)],
+        fallbacks=[CommandHandler("cancelar", cancelar), CommandHandler("start", start)],
     )
 
     admin_add_conv = ConversationHandler(
@@ -1044,40 +914,23 @@ def construir_bot_tienda() -> Application:
     return app
 
 
-def construir_bot_sms() -> Application:
-    app = Application.builder().token(SMS_BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", sms_bot_start))
-    app.add_handler(CommandHandler("restart", sms_bot_restart))
-    app.add_handler(CommandHandler("sync", sms_bot_sync))
-    app.add_handler(CommandHandler("auto", sms_bot_auto))
-    app.add_handler(CommandHandler("clear", sms_bot_clear))
-    # Cualquier otra cosa que escriban o manden (texto, fotos, archivos...) se ignora/borra.
-    app.add_handler(MessageHandler(~filters.COMMAND, sms_bot_ignorar))
-    return app
-
-
 async def main_async():
-    global SMS_BOT_APP, TIENDA_BOT_APP
+    global TIENDA_BOT_USERNAME
 
     db.init_db()
     sembrar_catalogo_inicial()
 
     app_tienda = construir_bot_tienda()
     await app_tienda.initialize()
+    me = await app_tienda.bot.get_me()
+    TIENDA_BOT_USERNAME = me.username
     await app_tienda.start()
     await app_tienda.updater.start_polling()
-    TIENDA_BOT_APP = app_tienda
-    logger.info("Bot de la tienda iniciado...")
+    logger.info("Bot de la tienda iniciado como @%s...", TIENDA_BOT_USERNAME)
 
-    if SMS_BOT_TOKEN:
-        app_sms = construir_bot_sms()
-        await app_sms.initialize()
-        await app_sms.start()
-        await app_sms.updater.start_polling()
-        SMS_BOT_APP = app_sms
-        logger.info("Bot de verificación (%s) iniciado...", SMS_BOT_USERNAME)
-    else:
-        logger.warning("SMS_BOT_TOKEN no configurado: el segundo bot no se ha iniciado.")
+    if not (GMAIL_ADDRESS and GMAIL_APP_PASSWORD):
+        logger.warning("GMAIL_ADDRESS/GMAIL_APP_PASSWORD no configurados: los emails no se enviarán "
+                        "(el código se mostrará directamente en el chat como respaldo).")
 
     await asyncio.Event().wait()  # mantiene el proceso vivo indefinidamente
 
